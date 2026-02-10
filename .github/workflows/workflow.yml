@@ -57,7 +57,7 @@ on:
         description: |
           Whether to include output paths when publishing to FlakeHub. Set to `false` for large/complex flakes where evaluation takes too long and causes OIDC token expiration.
         required: false
-        default: true
+        default: false
         type: boolean
       inventory-runner:
         description: |
