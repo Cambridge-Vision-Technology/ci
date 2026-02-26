@@ -43,10 +43,10 @@ else
   pass "no flakehub-push references"
 fi
 
-if grep -qi 'flake-iter' "$WORKFLOW"; then
-  fail "workflow still references flake-iter"
+if grep -i 'flake-iter' "$WORKFLOW" | grep -v 'DEPRECATED' | grep -v 'flake-iter-flakeref:' | grep -qi 'flake-iter'; then
+  fail "workflow still references flake-iter (outside deprecated inputs)"
 else
-  pass "no flake-iter references"
+  pass "no flake-iter references (outside deprecated inputs)"
 fi
 
 if grep -qi 'flake-checker-action' "$WORKFLOW"; then
@@ -171,6 +171,24 @@ if echo "$build_block" | grep -q 'id-token.*write'; then
   pass "build job has id-token: write"
 else
   fail "build job does not have id-token: write"
+fi
+
+# --- All deprecated no-op inputs are declared ---
+
+deprecated_inputs=(visibility default-branch flake-iter-flakeref include-output-paths inventory-runner use-flake-check)
+missing_deprecated=()
+for input_name in "${deprecated_inputs[@]}"; do
+  if grep -q "^      ${input_name}:" "$WORKFLOW"; then
+    :
+  else
+    missing_deprecated+=("$input_name")
+  fi
+done
+
+if [ ${#missing_deprecated[@]} -eq 0 ]; then
+  pass "all 6 deprecated no-op inputs are declared"
+else
+  fail "missing deprecated inputs: ${missing_deprecated[*]}"
 fi
 
 # --- Summary ---

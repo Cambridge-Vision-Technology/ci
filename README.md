@@ -32,7 +32,12 @@ jobs:
       id-token: write
 ```
 
-> [!NOTE] > `id-token: write` is required for FlakeHub Cache OIDC authentication.
+<!-- prettier-ignore-start -->
+
+> [!NOTE]
+> `id-token: write` is required for FlakeHub Cache OIDC authentication.
+
+<!-- prettier-ignore-end -->
 
 ...and you're done!
 Replace `$YOURORG` with your GitHub organisation or user.

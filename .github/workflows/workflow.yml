@@ -7,6 +7,32 @@ on:
         required: false
         default: false
         type: boolean
+      visibility:
+        description: "[DEPRECATED] No longer used. Will be removed in a future version."
+        required: false
+        type: string
+      default-branch:
+        description: "[DEPRECATED] No longer used. Will be removed in a future version."
+        required: false
+        type: string
+      flake-iter-flakeref:
+        description: "[DEPRECATED] No longer used. Will be removed in a future version."
+        required: false
+        type: string
+      include-output-paths:
+        description: "[DEPRECATED] No longer used. Will be removed in a future version."
+        required: false
+        default: false
+        type: boolean
+      inventory-runner:
+        description: "[DEPRECATED] No longer used. Will be removed in a future version."
+        required: false
+        type: string
+      use-flake-check:
+        description: "[DEPRECATED] No longer used. Will be removed in a future version."
+        required: false
+        default: false
+        type: boolean
       directory:
         description: |
           The root directory of your flake.
@@ -132,6 +158,10 @@ jobs:
           else
             echo "ℹ️ No LFS files in repository"
           fi
+      - name: Create netrc for Nix
+        run: |
+          touch /tmp/netrc
+          chmod 600 /tmp/netrc
       # Configure credentials for LFS - netrc for Nix's HTTP requests
       # NOTE: Do NOT set git config --global http.extraHeader - it breaks Nix fetching public repos
       - name: Configure credentials for LFS
@@ -144,10 +174,6 @@ jobs:
           echo "https://x-access-token:${GITHUB_TOKEN}@github.com" >> ~/.git-credentials
           # Create netrc for Nix's HTTP requests (used by Nix for fetching)
           echo "machine github.com login x-access-token password ${GITHUB_TOKEN}" > /tmp/netrc
-          chmod 600 /tmp/netrc
-      - name: Create netrc for Nix
-        run: |
-          touch /tmp/netrc
           chmod 600 /tmp/netrc
       - name: Clean up stale magic-nix-cache daemon
         run: pkill -f magic-nix-cache || true
