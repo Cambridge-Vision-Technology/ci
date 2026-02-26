@@ -29,7 +29,10 @@ jobs:
     uses: $YOURORG/ci/.github/workflows/workflow.yml@main
     permissions:
       contents: read
+      id-token: write
 ```
+
+> [!NOTE] > `id-token: write` is required for FlakeHub Cache OIDC authentication.
 
 ...and you're done!
 Replace `$YOURORG` with your GitHub organisation or user.
@@ -72,6 +75,7 @@ jobs:
     uses: $YOURORG/ci/.github/workflows/workflow.yml@main
     permissions:
       contents: read
+      id-token: write
     with:
       runner-map: |
         {
@@ -101,6 +105,7 @@ jobs:
     uses: $YOURORG/ci/.github/workflows/workflow.yml@main
     permissions:
       contents: read
+      id-token: write
     with:
       enable-ssh-agent: true
     secrets:
@@ -118,13 +123,14 @@ jobs:
     uses: $YOURORG/ci/.github/workflows/workflow.yml@main
     permissions:
       contents: read
+      id-token: write
     with:
       fail-fast: false
 ```
 
 ## Notes
 
-This workflow uses standard community actions (`cachix/install-nix-action`, `actions/checkout`, `webfactory/ssh-agent`).
+This workflow uses Determinate Nix (`DeterminateSystems/determinate-nix-action`) with FlakeHub Cache for binary caching, along with `actions/checkout` and `webfactory/ssh-agent`.
 
 [nix]: https://zero-to-nix.com
 [nix-system]: https://zero-to-nix.com/concepts/system-specificity

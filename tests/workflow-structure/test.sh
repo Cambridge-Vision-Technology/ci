@@ -17,13 +17,25 @@ fail() {
   failed=$((failed + 1))
 }
 
-# --- No FlakeHub references remain ---
+# --- Helper: extract the build job block ---
+# Captures everything between "  build:" and the next top-level job key
+extract_build_block() {
+  local in_build=false
+  while IFS= read -r line; do
+    if [[ "$line" == "  build:" ]] || [[ "$line" == "  build: "* ]]; then
+      in_build=true
+      continue
+    fi
+    if $in_build; then
+      if [[ "$line" =~ ^[[:space:]]{2}[a-zA-Z_][a-zA-Z0-9_-]*: ]] && ! [[ "$line" =~ ^[[:space:]]{3,} ]]; then
+        break
+      fi
+      echo "$line"
+    fi
+  done < "$WORKFLOW"
+}
 
-if grep -qi 'flakehub-cache-action' "$WORKFLOW"; then
-  fail "workflow still references flakehub-cache-action"
-else
-  pass "no flakehub-cache-action references"
-fi
+# --- No unwanted FlakeHub references ---
 
 if grep -qi 'flakehub-push' "$WORKFLOW"; then
   fail "workflow still references flakehub-push"
@@ -37,12 +49,6 @@ else
   pass "no flake-iter references"
 fi
 
-if grep -qi 'determinate-nix-action' "$WORKFLOW"; then
-  fail "workflow still references determinate-nix-action"
-else
-  pass "no determinate-nix-action references"
-fi
-
 if grep -qi 'flake-checker-action' "$WORKFLOW"; then
   fail "workflow still references flake-checker-action"
 else
@@ -52,27 +58,6 @@ fi
 # --- All jobs have timeout-minutes ---
 
 # Extract job names (top-level keys under "jobs:") and check each has timeout-minutes
-in_jobs=false
-current_job=""
-jobs_without_timeout=()
-
-while IFS= read -r line; do
-  # Detect start of jobs block
-  if [[ "$line" =~ ^jobs: ]]; then
-    in_jobs=true
-    continue
-  fi
-
-  if $in_jobs; then
-    # A top-level job is a line with exactly 2 spaces of indent followed by a word and colon
-    if [[ "$line" =~ ^[[:space:]]{2}[a-zA-Z_][a-zA-Z0-9_-]*: ]] && ! [[ "$line" =~ ^[[:space:]]{3,} ]]; then
-      current_job="$(echo "$line" | sed 's/^  //;s/:.*//')"
-    fi
-  fi
-done < "$WORKFLOW"
-
-# Now for each job, check if timeout-minutes appears in its block
-# We do this by extracting job blocks with awk-like logic
 job_names=()
 in_jobs=false
 while IFS= read -r line; do
@@ -91,9 +76,8 @@ while IFS= read -r line; do
 done < "$WORKFLOW"
 
 all_have_timeout=true
+jobs_without_timeout=()
 for job in "${job_names[@]}"; do
-  # Extract the block for this job and check for timeout-minutes
-  # A job block starts at "  <job>:" and ends at the next "  <other>:" at the same indent level
   in_target_job=false
   found_timeout=false
   while IFS= read -r line; do
@@ -102,7 +86,6 @@ for job in "${job_names[@]}"; do
       continue
     fi
     if $in_target_job; then
-      # Check if we've reached the next job (2-space indent, word followed by colon)
       if [[ "$line" =~ ^[[:space:]]{2}[a-zA-Z_][a-zA-Z0-9_-]*: ]] && ! [[ "$line" =~ ^[[:space:]]{3,} ]]; then
         break
       fi
@@ -124,35 +107,11 @@ else
   fail "jobs missing timeout-minutes: ${jobs_without_timeout[*]}"
 fi
 
-# --- No id-token permission ---
-
-if grep -q 'id-token' "$WORKFLOW"; then
-  fail "workflow still contains id-token permission"
-else
-  pass "no id-token permission found"
-fi
-
 # --- Build job contains nix flake check ---
 
-# Extract the build job block and look for "nix flake check"
-in_build=false
-found_flake_check=false
-while IFS= read -r line; do
-  if [[ "$line" == "  build:" ]] || [[ "$line" == "  build: "* ]]; then
-    in_build=true
-    continue
-  fi
-  if $in_build; then
-    if [[ "$line" =~ ^[[:space:]]{2}[a-zA-Z_][a-zA-Z0-9_-]*: ]] && ! [[ "$line" =~ ^[[:space:]]{3,} ]]; then
-      break
-    fi
-    if [[ "$line" =~ "nix flake check" ]]; then
-      found_flake_check=true
-    fi
-  fi
-done < "$WORKFLOW"
+build_block="$(extract_build_block)"
 
-if $found_flake_check; then
+if echo "$build_block" | grep -q 'nix flake check'; then
   pass "build job contains 'nix flake check'"
 else
   fail "build job does not contain 'nix flake check'"
@@ -164,6 +123,54 @@ if grep -qE '^\s*#\s*-\s+uses:' "$WORKFLOW"; then
   fail "workflow contains commented-out action references (e.g. '# - uses:')"
 else
   pass "no commented-out action references"
+fi
+
+# --- Build job uses determinate-nix-action ---
+
+if echo "$build_block" | grep -qi 'determinate-nix-action'; then
+  pass "build job uses determinate-nix-action"
+else
+  fail "build job does not use determinate-nix-action"
+fi
+
+# --- Build job uses flakehub-cache-action ---
+
+if echo "$build_block" | grep -qi 'flakehub-cache-action'; then
+  pass "build job uses flakehub-cache-action"
+else
+  fail "build job does not use flakehub-cache-action"
+fi
+
+# --- Build job has cleanup step for stale magic-nix-cache ---
+
+if echo "$build_block" | grep -qE 'pkill.*magic-nix-cache'; then
+  pass "build job has magic-nix-cache cleanup step"
+else
+  fail "build job does not have magic-nix-cache cleanup step"
+fi
+
+# --- flakehub-cache-action uses startup-notification-port: 0 ---
+
+if echo "$build_block" | grep -q 'startup-notification-port.*0'; then
+  pass "flakehub-cache-action uses startup-notification-port: 0"
+else
+  fail "flakehub-cache-action does not use startup-notification-port: 0"
+fi
+
+# --- flakehub-cache-action uses listen: 127.0.0.1:0 ---
+
+if echo "$build_block" | grep -q 'listen.*127\.0\.0\.1:0'; then
+  pass "flakehub-cache-action uses listen: 127.0.0.1:0"
+else
+  fail "flakehub-cache-action does not use listen: 127.0.0.1:0"
+fi
+
+# --- Build job has id-token: write ---
+
+if echo "$build_block" | grep -q 'id-token.*write'; then
+  pass "build job has id-token: write"
+else
+  fail "build job does not have id-token: write"
 fi
 
 # --- Summary ---
