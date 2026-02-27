@@ -1,20 +1,35 @@
 on:
   workflow_call:
     inputs:
-      visibility:
-        description: |
-          `public`, `unlisted`, or `private` ([private flakes](https://docs.determinate.systems/flakehub/private-flakes) are available only on a [FlakeHub paid plan](https://flakehub.com/signup)).
-        required: false
-        type: string
-      default-branch:
-        description: |
-          The [default Git branch](https://docs.github.com/repositories/configuring-branches-and-merges-in-your-repository/managing-branches-in-your-repository/changing-the-default-branch) for the repository.
-        required: false
-        default: ${{ github.event.repository.default_branch }}
-        type: string
       enable-ssh-agent:
         description: |
           Whether to enable [`webfactory/ssh-agent`](https://github.com/webfactory/ssh-agent) in the workflow. If you set this to `true` you need to supply a secret named `ssh-private-key`.
+        required: false
+        default: false
+        type: boolean
+      visibility:
+        description: "[DEPRECATED] No longer used. Will be removed in a future version."
+        required: false
+        type: string
+      default-branch:
+        description: "[DEPRECATED] No longer used. Will be removed in a future version."
+        required: false
+        type: string
+      flake-iter-flakeref:
+        description: "[DEPRECATED] No longer used. Will be removed in a future version."
+        required: false
+        type: string
+      include-output-paths:
+        description: "[DEPRECATED] No longer used. Will be removed in a future version."
+        required: false
+        default: false
+        type: boolean
+      inventory-runner:
+        description: "[DEPRECATED] No longer used. Will be removed in a future version."
+        required: false
+        type: string
+      use-flake-check:
+        description: "[DEPRECATED] No longer used. Will be removed in a future version."
         required: false
         default: false
         type: boolean
@@ -30,12 +45,6 @@ on:
         required: false
         default: true
         type: boolean
-      flake-iter-flakeref:
-        description: |
-          Flake reference to use for the flake-iter process. Useful for pinning to specific versions should standards require it. Defaults to the latest release available on FlakeHub.
-        type: string
-        required: false
-        default: https://flakehub.com/f/DeterminateSystems/flake-iter/*
       runner-map:
         description: |
           A custom mapping of [Nix system types](https://zero-to-nix.com/concepts/system-specificity) to desired Actions runners
@@ -53,51 +62,6 @@ on:
         required: false
         default: false
         type: boolean
-      include-output-paths:
-        description: |
-          Whether to include output paths when publishing to FlakeHub. Set to `false` for large/complex flakes where evaluation takes too long and causes OIDC token expiration.
-        required: false
-        default: false
-        type: boolean
-      inventory-runner:
-        description: |
-          The runner to use for the inventory job. Override this to use a self-hosted runner for private repos with Git LFS, since Nix's native LFS support requires authentication that GitHub-hosted runners may not have configured.
-        required: false
-        default: ubuntu-latest
-        type: string
-      use-flake-check:
-        description: |
-          Use `nix flake check` directly instead of flake-iter. Required for repos with Git LFS files because flake-iter locks to a git revision which causes Nix to fetch from git (LFS pointers) instead of the smudged working directory. Uses runner-map to determine which systems to build (supports multi-platform).
-        required: false
-        default: false
-        type: boolean
-    outputs:
-      flake_name:
-        value: ${{ jobs.success.outputs.flake_name }}
-        description: |
-          The name of the flake.
-
-          Example: `DeterminateSystems/flakehub-push`
-      flake_version:
-        value: ${{ jobs.success.outputs.flake_version }}
-        description: |
-          Version of the published flake.
-
-          Example: `0.1.99+rev-2075013a3f3544d45a96f4b35df4ed03cd53779c`
-      flakeref_exact:
-        value: ${{ jobs.success.outputs.flakeref_exact }}
-        description: |
-          A precise reference that always resolves to this to this exact release.
-
-          Example: `DeterminateSystems/flakehub-push/=0.1.99+rev-2075013a3f3544d45a96f4b35df4ed03cd53779c`
-      flakeref_at_least:
-        value: ${{ jobs.success.outputs.flakeref_at_least }}
-        description: |
-          A loose reference to this release.
-          Depending on this reference will require at least this version, and will also resolve to newer releases.
-          This output is not sufficient for deployment pipelines, use flake_exact instead.
-
-          Example: `DeterminateSystems/flakehub-push/0.1.99+rev-2075013a3f3544d45a96f4b35df4ed03cd53779c`
 
     secrets:
       ssh-private-key:
@@ -105,105 +69,33 @@ on:
 
 jobs:
   inventory:
-    runs-on: ${{ inputs.inventory-runner }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     outputs:
       systems: ${{ steps.inventory.outputs.systems }}
 
     permissions:
-      id-token: write
       contents: read
 
     steps:
-      # Install git-lfs before checkout when using custom runners that may not have it
-      - name: Install git-lfs (Linux)
-        if: ${{ inputs.enable-lfs && runner.os == 'Linux' }}
-        run: |
-          if ! command -v git-lfs &> /dev/null; then
-            # Download git-lfs from GitHub releases (works on Nix-based runners without sudo)
-            curl -sL https://github.com/git-lfs/git-lfs/releases/download/v3.6.1/git-lfs-linux-amd64-v3.6.1.tar.gz | tar xz
-            mkdir -p "$HOME/.local/bin"
-            mv git-lfs-3.6.1/git-lfs "$HOME/.local/bin/"
-            echo "$HOME/.local/bin" >> $GITHUB_PATH
-            export PATH="$HOME/.local/bin:$PATH"
-          fi
-          git lfs install --force
-      - name: Install git-lfs (macOS)
-        if: ${{ inputs.enable-lfs && runner.os == 'macOS' }}
-        run: |
-          if ! command -v git-lfs &> /dev/null; then
-            # Download git-lfs from GitHub releases (works without brew)
-            curl -sL https://github.com/git-lfs/git-lfs/releases/download/v3.6.1/git-lfs-darwin-arm64-v3.6.1.zip -o git-lfs.zip
-            unzip -q git-lfs.zip
-            mkdir -p "$HOME/.local/bin"
-            mv git-lfs-3.6.1/git-lfs "$HOME/.local/bin/"
-            echo "$HOME/.local/bin" >> $GITHUB_PATH
-            export PATH="$HOME/.local/bin:$PATH"
-          fi
-          git lfs install --force
-      - uses: actions/checkout@v4
-        with:
-          lfs: ${{ inputs.enable-lfs }}
-      # Configure credentials for LFS - netrc for Nix's HTTP requests
-      # NOTE: Do NOT set git config --global http.extraHeader - it breaks Nix fetching public repos
-      - name: Configure credentials for LFS
-        if: ${{ inputs.enable-lfs }}
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          # Configure git credential helper for LFS operations
-          git config --global credential.helper store
-          echo "https://x-access-token:${GITHUB_TOKEN}@github.com" >> ~/.git-credentials
-          # Create netrc for Nix's HTTP requests (used by determinate-nix-action)
-          echo "machine github.com login x-access-token password ${GITHUB_TOKEN}" > /tmp/netrc
-          chmod 600 /tmp/netrc
-      # disabled pending strategy discussion on exposing tunables
-      # - uses: Determinatesystems/flake-checker-action@main
-      - uses: DeterminateSystems/determinate-nix-action@v3
-        with:
-          extra-conf: |
-            netrc-file = /tmp/netrc
-      - uses: DeterminateSystems/flakehub-cache-action@main
-      - uses: webfactory/ssh-agent@v0.9.0
-        if: ${{ inputs.enable-ssh-agent }}
-        with:
-          ssh-private-key: ${{ secrets.ssh-private-key }}
-      - name: Add GitHub SSH host keys
-        if: ${{ inputs.enable-ssh-agent }}
-        run: |
-          mkdir -p ~/.ssh
-          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" >> ~/.ssh/known_hosts
-          echo "github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=" >> ~/.ssh/known_hosts
-          echo "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Ny" >> ~/.ssh/known_hosts
-          # Set NIX_SSHOPTS so nix daemon's SSH uses our known_hosts
-          echo "NIX_SSHOPTS=-o UserKnownHostsFile=$HOME/.ssh/known_hosts" >> "$GITHUB_ENV"
-          # Also set GIT_SSH_COMMAND for git operations
-          echo "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=$HOME/.ssh/known_hosts" >> "$GITHUB_ENV"
-      - name: Inventory the flake for targeted systems
+      - name: Build matrix from runner-map
         id: inventory
-        env:
-          FLAKE_ITER_RUNNER_MAP: ${{ toJson(fromJson(inputs.runner-map)) }}
-          FLAKE_ITER_FLAKEREF: ${{ inputs.flake-iter-flakeref }}
-        working-directory: ${{ inputs.directory }}
         run: |
-          if [[ "${{ inputs.use-flake-check }}" == "true" ]]; then
-            # Use runner-map directly for multi-system flake check
-            # Transform {"nix-system": "runner"} to [{"nix-system": "...", "runner": "..."}]
-            echo "systems=$(echo '${{ inputs.runner-map }}' | jq -c '[to_entries[] | {"nix-system": .key, "runner": .value}]')" >> "$GITHUB_OUTPUT"
-          else
-            nix run "$FLAKE_ITER_FLAKEREF" -- systems
-          fi
+          echo "systems=$(echo '${{ inputs.runner-map }}' | jq -c '[to_entries[] | {"nix-system": .key, "runner": .value}]')" >> "$GITHUB_OUTPUT"
+
   build:
     runs-on: ${{ matrix.systems.runner }}
     needs: inventory
+    timeout-minutes: 120
     strategy:
       fail-fast: ${{ inputs.fail-fast }}
       matrix:
         systems: ${{ fromJSON(needs.inventory.outputs.systems) }}
 
     permissions:
-      id-token: write
       contents: read
+      id-token: write
 
     steps:
       # Clean up stale git config from previous runs on self-hosted runners
@@ -266,6 +158,10 @@ jobs:
           else
             echo "ℹ️ No LFS files in repository"
           fi
+      - name: Create netrc for Nix
+        run: |
+          touch /tmp/netrc
+          chmod 600 /tmp/netrc
       # Configure credentials for LFS - netrc for Nix's HTTP requests
       # NOTE: Do NOT set git config --global http.extraHeader - it breaks Nix fetching public repos
       - name: Configure credentials for LFS
@@ -276,14 +172,21 @@ jobs:
           # Configure git credential helper for LFS operations
           git config --global credential.helper store
           echo "https://x-access-token:${GITHUB_TOKEN}@github.com" >> ~/.git-credentials
-          # Create netrc for Nix's HTTP requests (used by determinate-nix-action)
+          # Create netrc for Nix's HTTP requests (used by Nix for fetching)
           echo "machine github.com login x-access-token password ${GITHUB_TOKEN}" > /tmp/netrc
           chmod 600 /tmp/netrc
+      - name: Clean up stale magic-nix-cache daemon
+        run: pkill -f magic-nix-cache || true
       - uses: DeterminateSystems/determinate-nix-action@v3
         with:
           extra-conf: |
             netrc-file = /tmp/netrc
+      # Port 0 = OS-assigned ports, prevents EADDRINUSE on self-hosted runners
+      # where stale magic-nix-cache daemons may hold default ports
       - uses: DeterminateSystems/flakehub-cache-action@main
+        with:
+          listen: "127.0.0.1:0"
+          startup-notification-port: 0
       - uses: webfactory/ssh-agent@v0.9.0
         if: ${{ inputs.enable-ssh-agent }}
         with:
@@ -297,31 +200,19 @@ jobs:
           echo "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Ny" >> ~/.ssh/known_hosts
           echo "NIX_SSHOPTS=-o UserKnownHostsFile=$HOME/.ssh/known_hosts" >> "$GITHUB_ENV"
           echo "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=$HOME/.ssh/known_hosts" >> "$GITHUB_ENV"
-      - name: Build for ${{ matrix.systems.nix-system }}
-        env:
-          FLAKE_ITER_NIX_SYSTEM: ${{ matrix.systems.nix-system }}
-          FLAKE_ITER_FLAKEREF: ${{ inputs.flake-iter-flakeref }}
+      - name: nix flake check
         working-directory: ${{ inputs.directory }}
-        run: |
-          if [[ "${{ inputs.use-flake-check }}" == "true" ]]; then
-            nix flake check --verbose
-          else
-            nix run "$FLAKE_ITER_FLAKEREF" -- --verbose build
-          fi
+        run: nix flake check --verbose
 
   success:
     runs-on: ubuntu-latest
     needs: build
+    timeout-minutes: 5
     if: ${{ always() }}
+
     permissions:
-      id-token: write
       contents: read
 
-    outputs:
-      flake_name: ${{ steps.publish.outputs.flake_name }}
-      flake_version: ${{ steps.publish.outputs.flake_version }}
-      flakeref_exact: ${{ steps.publish.outputs.flakeref_exact }}
-      flakeref_at_least: ${{ steps.publish.outputs.flakeref_at_least }}
     steps:
       - run: "true"
       - run: |
@@ -330,36 +221,3 @@ jobs:
         if: |
           contains(needs.*.result, 'failure') ||
           contains(needs.*.result, 'cancelled')
-      # NOTE: LFS intentionally disabled here — flakehub-push archives the working
-      # directory and LFS-smudged files (test fixtures, PDFs) inflate the archive
-      # past FlakeHub's 75 MiB limit. LFS pointers (~130 bytes) are sufficient
-      # since FlakeHub only needs source, not test data. The build job (which runs
-      # nix flake check) still checks out with LFS enabled.
-      - uses: actions/checkout@v4
-        if: ${{ !github.repository.fork && inputs.visibility != '' && (github.ref == format('refs/heads/{0}', inputs.default-branch) || startsWith(github.ref, 'refs/tags/')) }}
-      - uses: DeterminateSystems/determinate-nix-action@v3
-        if: ${{ !github.repository.fork && inputs.visibility != '' && (github.ref == format('refs/heads/{0}', inputs.default-branch) || startsWith(github.ref, 'refs/tags/')) }}
-      - uses: DeterminateSystems/flakehub-cache-action@main
-        if: ${{ !github.repository.fork && inputs.visibility != '' && (github.ref == format('refs/heads/{0}', inputs.default-branch) || startsWith(github.ref, 'refs/tags/')) }}
-      - uses: webfactory/ssh-agent@v0.9.0
-        if: ${{ inputs.enable-ssh-agent && !github.repository.fork && inputs.visibility != '' && (github.ref == format('refs/heads/{0}', inputs.default-branch) || startsWith(github.ref, 'refs/tags/')) }}
-        with:
-          ssh-private-key: ${{ secrets.ssh-private-key }}
-      - name: Add GitHub SSH host keys
-        if: ${{ inputs.enable-ssh-agent && !github.repository.fork && inputs.visibility != '' && (github.ref == format('refs/heads/{0}', inputs.default-branch) || startsWith(github.ref, 'refs/tags/')) }}
-        run: |
-          mkdir -p ~/.ssh
-          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" >> ~/.ssh/known_hosts
-          echo "github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=" >> ~/.ssh/known_hosts
-          echo "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Ny" >> ~/.ssh/known_hosts
-          echo "NIX_SSHOPTS=-o UserKnownHostsFile=$HOME/.ssh/known_hosts" >> "$GITHUB_ENV"
-          echo "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=$HOME/.ssh/known_hosts" >> "$GITHUB_ENV"
-      # NOTE: pinned to last known working version — @main broke auth (401 on /token/status)
-      - uses: DeterminateSystems/flakehub-push@9f22a225279b7dc785553ff476bad4f0cb4e764b
-        if: ${{ !github.repository.fork && inputs.visibility != '' && (github.ref == format('refs/heads/{0}', inputs.default-branch) || startsWith(github.ref, 'refs/tags/')) }}
-        id: publish
-        with:
-          rolling: ${{ github.ref == format('refs/heads/{0}', inputs.default-branch) }}
-          visibility: ${{ inputs.visibility }}
-          include-output-paths: ${{ inputs.include-output-paths }}
-          directory: ${{ inputs.directory }}
