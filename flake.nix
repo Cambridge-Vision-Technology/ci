@@ -32,7 +32,7 @@
           default = pkgs.mkShellNoCC {
             buildInputs = [
               pkgs.nodePackages.prettier
-              pkgs.action-validator
+              pkgs.actionlint
             ];
           };
         }
