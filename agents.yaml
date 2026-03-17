@@ -1,0 +1,35 @@
+project:
+  name: "ci"
+  tags: ["general", "nix", "ci"]
+  description: "Shared Nix CI workflow for GitHub Actions"
+  header: |
+    # Nix CI
+
+    Shared reusable GitHub Actions workflow for Nix projects. Automatically builds on all architectures your flake supports and runs `nix flake check` on every platform in your runner map.
+
+    ## Architecture
+
+    - `.github/workflows/workflow.yml` — the reusable workflow (called by consumer repos)
+    - `.github/workflows/validate.yml` — self-validation CI for this repo
+    - `tests/` — shell-based tests run via `nix flake check`
+
+    ## Testing
+
+    Tests are pure shell scripts in `tests/*/test.sh`. They validate workflow YAML structure and jq transformations. Run all tests with `nix flake check`.
+  footer: |
+    This file is generated, do not edit it directly. Edit either the project specific information in [agents.yaml](./agents.yaml) or the [company guidance](https://github.com/Cambridge-Vision-Technology/agen/wiki) and then rerun `agen`
+    To install the agen tool `nix profile add github:Cambridge-Vision-Technology/agen`
+
+    # CI Repo Guidance
+
+    ## Workflow Inputs
+
+    The reusable workflow accepts these inputs: `enable-ssh-agent`, `directory`, `fail-fast`, `runner-map`, `enable-lfs`, `check-dev-shells`. The `runner-map` input is a JSON object mapping nix system names to GitHub runner labels.
+
+    ## Test Structure
+
+    Each test directory under `tests/` contains a `test.sh` that is wired into `nix flake check` as a derivation. Tests use `yq` and `jq` to parse and validate the workflow YAML.
+
+    ## Formatting
+
+    Use `prettier` for YAML/JSON/Markdown formatting. Use `actionlint` for workflow linting. Both are available in the devshell.

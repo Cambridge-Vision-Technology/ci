@@ -1,10 +1,15 @@
 {
   inputs = {
     nixpkgs.url = "https://flakehub.com/f/DeterminateSystems/nixpkgs-weekly/*";
+
+    agen = {
+      url = "git+ssh://git@github.com/Cambridge-Vision-Technology/agen";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { nixpkgs, ... }:
+    { nixpkgs, agen, ... }:
     let
       inherit (nixpkgs) lib;
 
@@ -33,7 +38,13 @@
             buildInputs = [
               pkgs.nodePackages.prettier
               pkgs.actionlint
+              agen.packages.${pkgs.system}.default
             ];
+
+            shellHook = ''
+              # Regenerate CLAUDE.md from agents.yaml and company guidance
+              agen >&2
+            '';
           };
         }
       );

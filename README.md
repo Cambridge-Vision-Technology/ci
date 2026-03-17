@@ -44,14 +44,14 @@ Replace `$YOURORG` with your GitHub organisation or user.
 
 ## Configuration options
 
-| Parameter          | Description                                                                                                                                           | Default                                                                                                      |
-| :----------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------- |
-| `enable-ssh-agent` | Whether to enable [`webfactory/ssh-agent`][ssh-agent] in the workflow. If you set this to `true` you need to supply a secret named `ssh-private-key`. | `false`                                                                                                      |
-| `enable-lfs`       | Whether to enable Git LFS when checking out the repository. Set to `true` if your repository uses Git LFS for large files.                            | `false`                                                                                                      |
-| `check-dev-shells` | Whether to validate devShells by running `nix develop --command true`. Set to `false` if your devShells are expensive or unavailable on some systems.  | `true`                                                                                                       |
-| `directory`        | The root directory of your flake.                                                                                                                     | `.`                                                                                                          |
-| `fail-fast`        | Whether to cancel all in-progress jobs if any matrix job fails                                                                                        | `true`                                                                                                       |
-| `runner-map`       | A custom mapping of [Nix system types][nix-system] to desired Actions runners                                                                         | `{ "aarch64-darwin": "macos-latest", "x86_64-linux": "ubuntu-latest", "aarch64-linux": "ubuntu-24.04-arm" }` |
+| Parameter          | Description                                                                                                                                           | Default                                                                          |
+| :----------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------- |
+| `enable-ssh-agent` | Whether to enable [`webfactory/ssh-agent`][ssh-agent] in the workflow. If you set this to `true` you need to supply a secret named `ssh-private-key`. | `false`                                                                          |
+| `enable-lfs`       | Whether to enable Git LFS when checking out the repository. Set to `true` if your repository uses Git LFS for large files.                            | `false`                                                                          |
+| `check-dev-shells` | Whether to validate devShells by running `nix develop --command true`. Set to `false` if your devShells are expensive or unavailable on some systems. | `true`                                                                           |
+| `directory`        | The root directory of your flake.                                                                                                                     | `.`                                                                              |
+| `fail-fast`        | Whether to cancel all in-progress jobs if any matrix job fails                                                                                        | `true`                                                                           |
+| `runner-map`       | A custom mapping of [Nix system types][nix-system] to desired Actions runners                                                                         | `{ "aarch64-darwin": "macos-arm64-nix-darwin", "x86_64-linux": "x86_64-linux" }` |
 
 ## Example configurations
 
@@ -61,19 +61,19 @@ The sections below show configurations for some common use cases.
 
 #### GitHub Actions Runners
 
-##### Standard and larger runners
+##### Default runners
 
-By default, the CI maps the Nix systems to their equivalent GitHub-hosted runners:
+By default, the CI maps the Nix systems to the org's self-hosted runners:
 
-|                                                   | macOS (Apple Silicon)                | ARM Linux                            | x86 Linux                   |
-| ------------------------------------------------- | ------------------------------------ | ------------------------------------ | --------------------------- |
-| Flake `system` (Nix build platform)               | `aarch64-darwin`                     | `aarch64-linux`                      | `x86_64-linux`              |
-| [GitHub Actions Runner][runners] (workflow label) | `macos-latest` (using Apple Silicon) | `ubuntu-24.04-arm` (using ARM Linux) | `ubuntu-latest` (using x86) |
+|                                                   | macOS (Apple Silicon)                      | x86 Linux                        |
+| ------------------------------------------------- | ------------------------------------------ | -------------------------------- |
+| Flake `system` (Nix build platform)               | `aarch64-darwin`                           | `x86_64-linux`                   |
+| [GitHub Actions Runner][runners] (workflow label) | `macos-arm64-nix-darwin` (org self-hosted) | `x86_64-linux` (org self-hosted) |
 
-##### Non-standard runners
+##### Custom runners
 
-You can also use several types of non-standard runners by providing a custom runner map.
-For example, this runner map enables the [larger GitHub runners for macOS][runners-large-macos]:
+You can override the defaults by providing a custom runner map.
+For example, this runner map uses a [larger GitHub-hosted runner for macOS][runners-large-macos]:
 
 ```yaml
 jobs:
@@ -92,14 +92,13 @@ jobs:
 > [!TIP]
 > Using `macos-latest-large` is currently the only way to run _current_ macOS on Intel architecture.
 
-The other two types of runners are those provisioned on your own infrastructure, and [larger Ubuntu (not macOS) runners][runners-large] with bespoke specs (for example, 64 CPUs, 128GB RAM) hosted by GitHub.
-Confusingly, GitHub sometimes refers to both of these as "self-hosted" runners.
+You can also use GitHub-hosted runners or [larger Ubuntu runners][runners-large] with bespoke specs (for example, 64 CPUs, 128GB RAM) by providing the appropriate labels in your runner map.
 
 > [!IMPORTANT]
-> Shared workflows such as the one used in this repo [can only access][workflow-access] non-standard runners if the workflow repo (this one) is owned by the same organisation or user.
-> To use this repo with non-standard runners, fork the repository and point the `uses` line at your fork.
+> Shared workflows such as the one used in this repo [can only access][workflow-access] self-hosted runners if the workflow repo (this one) is owned by the same organisation or user.
+> To use this repo with your own self-hosted runners, fork the repository and point the `uses` line at your fork.
 >
-> This limitation does not apply to larger macOS runners hosted by GitHub.
+> This limitation does not apply to GitHub-hosted runners.
 
 #### Private SSH keys
 

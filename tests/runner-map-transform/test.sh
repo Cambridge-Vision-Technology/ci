@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+WORKFLOW="$REPO_ROOT/.github/workflows/workflow.yml"
+
 passed=0
 failed=0
 
@@ -19,26 +22,22 @@ transform() {
   echo "$1" | jq -c '[to_entries[] | {"nix-system": .key, "runner": .value}]'
 }
 
-# --- Test 1: Default 3-system runner-map produces correct array with 3 entries ---
+# --- Test 1: Default 2-system runner-map produces correct array with 2 entries ---
 
-DEFAULT_RUNNER_MAP='{
-  "aarch64-darwin": "macos-latest",
-  "x86_64-linux": "ubuntu-latest",
-  "aarch64-linux": "ubuntu-24.04-arm"
-}'
+DEFAULT_RUNNER_MAP="$(yq -r '.on.workflow_call.inputs."runner-map".default' "$WORKFLOW")"
 
 result="$(transform "$DEFAULT_RUNNER_MAP")"
 count="$(echo "$result" | jq 'length')"
 
-if [ "$count" -eq 3 ]; then
-  pass "default 3-system runner-map produces array with 3 entries"
+if [ "$count" -eq 2 ]; then
+  pass "default 2-system runner-map produces array with 2 entries"
 else
-  fail "default 3-system runner-map: expected 3 entries, got $count"
+  fail "default 2-system runner-map: expected 2 entries, got $count"
 fi
 
 # Verify each entry has both nix-system and runner keys
 valid_keys=true
-for i in 0 1 2; do
+for i in 0 1; do
   has_nix_system="$(echo "$result" | jq ".[$i] | has(\"nix-system\")")"
   has_runner="$(echo "$result" | jq ".[$i] | has(\"runner\")")"
   if [ "$has_nix_system" != "true" ] || [ "$has_runner" != "true" ]; then
@@ -52,12 +51,28 @@ else
   fail "default runner-map entries missing nix-system or runner keys"
 fi
 
-# Verify a specific entry is present
-has_x86="$(echo "$result" | jq '[.[] | select(."nix-system" == "x86_64-linux" and .runner == "ubuntu-latest")] | length')"
+# Verify specific mapping: x86_64-linux -> x86_64-linux
+has_x86="$(echo "$result" | jq '[.[] | select(."nix-system" == "x86_64-linux" and .runner == "x86_64-linux")] | length')"
 if [ "$has_x86" -eq 1 ]; then
-  pass "default runner-map contains x86_64-linux -> ubuntu-latest mapping"
+  pass "default runner-map contains x86_64-linux -> x86_64-linux mapping"
 else
-  fail "default runner-map missing x86_64-linux -> ubuntu-latest mapping"
+  fail "default runner-map missing x86_64-linux -> x86_64-linux mapping"
+fi
+
+# Verify default runner-map does NOT contain aarch64-linux
+has_aarch64_linux="$(echo "$result" | jq '[.[] | select(."nix-system" == "aarch64-linux")] | length')"
+if [ "$has_aarch64_linux" -eq 0 ]; then
+  pass "default runner-map does not contain aarch64-linux"
+else
+  fail "default runner-map should not contain aarch64-linux"
+fi
+
+# Verify default runner-map contains macos-arm64-nix-darwin as a runner value
+has_macos_self_hosted="$(echo "$result" | jq '[.[] | select(.runner == "macos-arm64-nix-darwin")] | length')"
+if [ "$has_macos_self_hosted" -eq 1 ]; then
+  pass "default runner-map contains macos-arm64-nix-darwin runner"
+else
+  fail "default runner-map missing macos-arm64-nix-darwin runner"
 fi
 
 # --- Test 2: Single-system map produces array with 1 entry ---

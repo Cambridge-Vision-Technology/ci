@@ -52,9 +52,8 @@ on:
         type: string
         default: |
           {
-            "aarch64-darwin": "macos-latest",
-            "x86_64-linux": "ubuntu-latest",
-            "aarch64-linux": "ubuntu-24.04-arm"
+            "aarch64-darwin": "macos-arm64-nix-darwin",
+            "x86_64-linux": "x86_64-linux"
           }
       enable-lfs:
         description: |
