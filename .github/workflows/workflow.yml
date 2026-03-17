@@ -62,6 +62,15 @@ on:
         required: false
         default: false
         type: boolean
+      check-dev-shells:
+        description: |
+          Whether to validate devShells by running `nix develop --command true` for each
+          devShell defined for the current system. Catches broken dev shells that
+          `nix flake check` misses. Set to `false` if your devShells are expensive to
+          build or intentionally unavailable on some systems.
+        required: false
+        default: true
+        type: boolean
 
     secrets:
       ssh-private-key:
@@ -203,6 +212,53 @@ jobs:
       - name: nix flake check
         working-directory: ${{ inputs.directory }}
         run: nix flake check --verbose
+      - name: Validate devShells
+        if: ${{ inputs.check-dev-shells }}
+        working-directory: ${{ inputs.directory }}
+        run: |
+          system="${{ matrix.systems.nix-system }}"
+          echo "Discovering devShells for system: $system"
+
+          nix_eval_stderr="$(mktemp)"
+          if nix_eval_output=$(nix eval --json ".#devShells.$system" --apply builtins.attrNames 2>"$nix_eval_stderr"); then
+            dev_shells=$(echo "$nix_eval_output" | jq -r '.[]')
+          # "does not provide attribute" matches Nix's error for missing flake outputs.
+          # If Nix changes this wording, the grep won't match and we fall through to
+          # the hard-error branch (exit 1) — failing closed is the safer default.
+          elif grep -q "does not provide attribute" "$nix_eval_stderr"; then
+            echo "Flake does not provide devShells.$system, skipping"
+            dev_shells=""
+          else
+            echo "::error::nix eval failed:"
+            cat "$nix_eval_stderr" >&2
+            rm -f "$nix_eval_stderr"
+            exit 1
+          fi
+          rm -f "$nix_eval_stderr"
+
+          if [ -z "$dev_shells" ]; then
+            echo "No devShells found for $system, skipping"
+            exit 0
+          fi
+
+          echo "Found devShells: $dev_shells"
+
+          failed=0
+          for shell_name in $dev_shells; do
+            echo "::group::Validating devShell: $shell_name"
+            if nix develop ".#$shell_name" --command true; then
+              echo "✅ $shell_name"
+            else
+              echo "❌ $shell_name"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::One or more devShells failed validation"
+            exit 1
+          fi
 
   success:
     runs-on: ubuntu-latest

@@ -1,13 +1,10 @@
 {
   inputs = {
     nixpkgs.url = "https://flakehub.com/f/DeterminateSystems/nixpkgs-weekly/*";
-
-    # For action-validator, which is broken with new rust versions
-    nixpkgs-old.url = "https://flakehub.com/f/NixOS/nixpkgs/0.2411.717196";
   };
 
   outputs =
-    { nixpkgs, nixpkgs-old, ... }:
+    { nixpkgs, ... }:
     let
       inherit (nixpkgs) lib;
 
@@ -23,21 +20,19 @@
           system:
           let
             pkgs = nixpkgs.legacyPackages.${system};
-            pkgs-old = nixpkgs-old.legacyPackages.${system};
           in
-          f { inherit pkgs pkgs-old; }
+          f { inherit pkgs; }
         );
     in
     {
 
       devShells = forEachSystem (
-        { pkgs, pkgs-old }:
+        { pkgs }:
         {
           default = pkgs.mkShellNoCC {
             buildInputs = [
               pkgs.nodePackages.prettier
-
-              pkgs-old.action-validator
+              pkgs.action-validator
             ];
           };
         }

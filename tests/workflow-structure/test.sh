@@ -117,6 +117,62 @@ else
   fail "build job does not contain 'nix flake check'"
 fi
 
+# --- Build job contains devShell validation ---
+
+if echo "$build_block" | grep -q 'nix develop.*--command true'; then
+  pass "build job contains devShell validation step"
+else
+  fail "build job does not contain devShell validation step"
+fi
+
+# --- check-dev-shells input is declared ---
+
+if grep -q 'check-dev-shells:' "$WORKFLOW"; then
+  pass "check-dev-shells input is declared"
+else
+  fail "check-dev-shells input is not declared"
+fi
+
+# --- devShell validation does not silently swallow errors ---
+
+# Extract the Validate devShells step block
+validate_devshells_block=""
+in_step=false
+while IFS= read -r line; do
+  if [[ "$line" == *"name: Validate devShells"* ]]; then
+    in_step=true
+    continue
+  fi
+  if $in_step; then
+    if [[ "$line" =~ ^[[:space:]]*-[[:space:]]+(name:|uses:) ]]; then
+      break
+    fi
+    validate_devshells_block+="$line"$'\n'
+  fi
+done < "$WORKFLOW"
+
+if echo "$validate_devshells_block" | grep -q '2>/dev/null'; then
+  fail "Validate devShells step contains 2>/dev/null (silently swallows errors)"
+else
+  pass "Validate devShells step does not contain 2>/dev/null"
+fi
+
+# --- nix eval fallback must distinguish missing-attribute from real failures ---
+
+if echo "$validate_devshells_block" | grep -qE "\|\| echo '\[\]'"; then
+  fail "Validate devShells step uses bare '|| echo []' fallback (masks genuine nix eval failures)"
+else
+  pass "Validate devShells step does not use bare '|| echo []' fallback"
+fi
+
+# --- Validate devShells checks for missing-attribute error specifically ---
+
+if echo "$validate_devshells_block" | grep -q 'does not provide attribute'; then
+  pass "Validate devShells step checks for 'does not provide attribute' error"
+else
+  fail "Validate devShells step does not check for 'does not provide attribute' error (missing-attribute detection needed)"
+fi
+
 # --- No commented-out action references ---
 
 if grep -qE '^\s*#\s*-\s+uses:' "$WORKFLOW"; then
@@ -189,6 +245,22 @@ if [ ${#missing_deprecated[@]} -eq 0 ]; then
   pass "all 6 deprecated no-op inputs are declared"
 else
   fail "missing deprecated inputs: ${missing_deprecated[*]}"
+fi
+
+# --- check-dev-shells defaults to true ---
+
+if grep -A8 'check-dev-shells:' "$WORKFLOW" | grep -q 'default: true'; then
+  pass "check-dev-shells defaults to true"
+else
+  fail "check-dev-shells does not default to true"
+fi
+
+# --- Validate devShells step has correct if condition ---
+
+if grep -B1 -A1 'name: Validate devShells' "$WORKFLOW" | grep -q "if: \${{ inputs.check-dev-shells }}"; then
+  pass "Validate devShells step has correct if condition"
+else
+  fail "Validate devShells step does not have correct if condition"
 fi
 
 # --- Summary ---
