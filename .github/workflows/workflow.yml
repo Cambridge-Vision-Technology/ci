@@ -204,6 +204,29 @@ jobs:
           } >> ~/.ssh/known_hosts
           echo "NIX_SSHOPTS=-o UserKnownHostsFile=$HOME/.ssh/known_hosts" >> "$GITHUB_ENV"
           echo "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=$HOME/.ssh/known_hosts" >> "$GITHUB_ENV"
+      - name: Debug git fetch (temporary)
+        if: ${{ inputs.enable-ssh-agent }}
+        working-directory: ${{ inputs.directory }}
+        run: |
+          echo "=== Nix version ==="
+          nix --version
+          echo "=== Git version ==="
+          git --version
+          echo "=== Nix config: lazy-trees ==="
+          nix config show lazy-trees || true
+          echo "=== Fetching purescript-dedup and checking hash ==="
+          STORE_PATH=$(nix eval --raw --expr 'builtins.fetchGit { url = "ssh://git@github.com/Cambridge-Vision-Technology/purescript-dedup"; rev = "303420fc6d8bb88ca8d49ac719a360e11cf1a8cb"; }' 2>&1) || true
+          echo "Store path: $STORE_PATH"
+          if [ -d "$STORE_PATH" ]; then
+            echo "=== NAR hash ==="
+            nix hash path "$STORE_PATH"
+            echo "=== LFS file check ==="
+            head -3 "$STORE_PATH/test/fixtures/credential-handling/recording-standard-0.85.zstd" 2>/dev/null || echo "file not found"
+            echo "=== File type ==="
+            file "$STORE_PATH/test/fixtures/credential-handling/recording-standard-0.85.zstd" 2>/dev/null || echo "file not found"
+          fi
+          echo "=== Lock hash ==="
+          jq '.nodes["purescript-dedup"].locked.narHash' flake.lock
       - name: nix flake check
         working-directory: ${{ inputs.directory }}
         run: nix flake check --verbose
