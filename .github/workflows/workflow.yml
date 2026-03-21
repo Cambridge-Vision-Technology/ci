@@ -189,12 +189,6 @@ jobs:
         with:
           extra-conf: |
             netrc-file = /tmp/netrc
-      # Port 0 = OS-assigned ports, prevents EADDRINUSE on self-hosted runners
-      # where stale magic-nix-cache daemons may hold default ports
-      - uses: DeterminateSystems/flakehub-cache-action@main
-        with:
-          listen: "127.0.0.1:0"
-          startup-notification-port: 0
       - uses: webfactory/ssh-agent@v0.9.0
         if: ${{ inputs.enable-ssh-agent }}
         with:
