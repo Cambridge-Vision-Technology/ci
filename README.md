@@ -147,7 +147,7 @@ Findings surface in three places:
 
 - **Code Scanning tab** — SARIF from every scanner, one row per finding, annotations in PR diffs
 - **Actions job summary** — markdown table of findings per scanner
-- **Dependency graph** — SBOM populates the repo's dependencies view
+- **Workflow artifacts** — SBOM (CycloneDX + SPDX) uploaded as `security-sbom`, 30-day retention
 
 ```yaml
 jobs:
@@ -156,6 +156,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      actions: read # required for SARIF upload to Code Scanning
       security-events: write
     with:
       enable-security: true

@@ -346,10 +346,16 @@ else
   fail "security-scan does not write to GITHUB_STEP_SUMMARY"
 fi
 
-if echo "$security_scan_block" | grep -qi 'spdx-dependency-submission-action'; then
-  pass "security-scan submits SBOM via spdx-dependency-submission-action"
+if echo "$security_scan_block" | grep -q 'actions/upload-artifact'; then
+  pass "security-scan uploads SBOM as workflow artifact"
 else
-  fail "security-scan does not submit SBOM"
+  fail "security-scan does not upload SBOM as artifact"
+fi
+
+if echo "$security_scan_block" | grep -qE 'actions:\s*read'; then
+  pass "security-scan job has actions: read permission (required for SARIF upload)"
+else
+  fail "security-scan job does not have actions: read permission"
 fi
 
 # --- Security scan: fails the job when scanner reports findings ---

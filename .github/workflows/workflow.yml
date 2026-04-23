@@ -271,6 +271,11 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      # NOTE: `actions: read` is required by github/codeql-action/upload-sarif
+      # so it can GET the workflow run. Without it the upload fails with
+      # "Resource not accessible by integration" and no SARIF reaches
+      # Code Scanning.
+      actions: read
 
     steps:
       - name: Clean up stale git extraHeader config
@@ -308,11 +313,21 @@ jobs:
           if [ -f out/security/summary.md ]; then
             cat out/security/summary.md >> "$GITHUB_STEP_SUMMARY"
           fi
-      - name: Submit SBOM to Dependency graph
-        if: always() && hashFiles(format('{0}/out/security/sbom.spdx.json', inputs.directory)) != ''
-        uses: advanced-security/spdx-dependency-submission-action@v0.1.1
+      - name: Upload SBOM as workflow artifact
+        # NOTE: we deliberately do NOT submit the SBOM to GitHub's Dependency
+        # graph via the dependency-submission API — that requires
+        # `contents: write` which is over-privileged for an opt-in scanner.
+        # The SBOM is uploaded as a build artifact instead; consumers who
+        # want dep-graph submission can add their own step with elevated
+        # permissions.
+        if: always() && hashFiles(format('{0}/out/security/sbom.cdx.json', inputs.directory)) != ''
+        uses: actions/upload-artifact@v4
         with:
-          filePath: ${{ inputs.directory }}/out/security/sbom.spdx.json
+          name: security-sbom
+          path: |
+            ${{ inputs.directory }}/out/security/sbom.cdx.json
+            ${{ inputs.directory }}/out/security/sbom.spdx.json
+          retention-days: 30
       - name: Fail job if scanner found un-suppressed issues
         if: steps.scan.outcome == 'failure'
         run: exit 1
