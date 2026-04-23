@@ -70,6 +70,15 @@ on:
         required: false
         default: true
         type: boolean
+      enable-security:
+        description: |
+          Whether to run the central security scan (gitleaks + trivy + semgrep + syft)
+          against the consumer repo. Outputs SARIF to the Code Scanning tab, a markdown
+          summary to the Actions job summary, and an SBOM to the Dependency graph.
+          Default `false` during initial rollout; flip to `true` per-repo to opt in.
+        required: false
+        default: false
+        type: boolean
 
     secrets:
       ssh-private-key:
@@ -254,9 +263,57 @@ jobs:
             exit 1
           fi
 
+  security-scan:
+    if: ${{ inputs.enable-security }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Clean up stale git extraHeader config
+        run: git config --global --unset-all http.https://github.com/.extraHeader || true
+      - uses: actions/checkout@v4
+        with:
+          lfs: ${{ inputs.enable-lfs }}
+          fetch-depth: 1
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - name: Run security scan
+        id: scan
+        working-directory: ${{ inputs.directory }}
+        continue-on-error: true
+        # NOTE: `github.workflow_sha` pins the scanner to the exact commit of
+        # the workflow.yml being executed, so consumers pinning `@v1.2.3` or
+        # `@main` get the scanner matching that workflow version.
+        run: |
+          nix run "github:Cambridge-Vision-Technology/ci?ref=${{ github.workflow_sha }}#security-scan" -- .
+      - name: Upload SARIF to Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ inputs.directory }}/out/security/
+          category: ci-security-scan
+      - name: Publish summary to Actions
+        if: always()
+        working-directory: ${{ inputs.directory }}
+        run: |
+          if [ -f out/security/summary.md ]; then
+            cat out/security/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Submit SBOM to Dependency graph
+        if: always() && hashFiles(format('{0}/out/security/sbom.spdx.json', inputs.directory)) != ''
+        uses: advanced-security/spdx-dependency-submission-action@v0.1.1
+        with:
+          filePath: ${{ inputs.directory }}/out/security/sbom.spdx.json
+      - name: Fail job if scanner found un-suppressed issues
+        if: steps.scan.outcome == 'failure'
+        run: exit 1
+
   success:
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, security-scan]
     timeout-minutes: 5
     if: ${{ always() }}
 
@@ -266,7 +323,7 @@ jobs:
     steps:
       - run: "true"
       - run: |
-          echo "A dependent in the build matrix failed."
+          echo "A dependent job failed or was cancelled."
           exit 1
         if: |
           contains(needs.*.result, 'failure') ||

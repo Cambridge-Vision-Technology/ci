@@ -263,6 +263,113 @@ else
   fail "Validate devShells step does not have correct if condition"
 fi
 
+# --- Security scan: extract block helper ---
+extract_security_scan_block() {
+  local in_block=false
+  while IFS= read -r line; do
+    if [[ "$line" == "  security-scan:" ]] || [[ "$line" == "  security-scan: "* ]]; then
+      in_block=true
+      continue
+    fi
+    if $in_block; then
+      if [[ "$line" =~ ^[[:space:]]{2}[a-zA-Z_][a-zA-Z0-9_-]*: ]] && ! [[ "$line" =~ ^[[:space:]]{3,} ]]; then
+        break
+      fi
+      echo "$line"
+    fi
+  done < "$WORKFLOW"
+}
+
+# --- Security scan: enable-security input is declared, defaults to false ---
+
+if grep -q '^      enable-security:' "$WORKFLOW"; then
+  pass "enable-security input is declared"
+else
+  fail "enable-security input is not declared"
+fi
+
+if grep -A8 '^      enable-security:' "$WORKFLOW" | grep -q 'default: false'; then
+  pass "enable-security defaults to false (opt-in rollout)"
+else
+  fail "enable-security does not default to false"
+fi
+
+# --- Security scan: job exists and is gated ---
+
+security_scan_block="$(extract_security_scan_block)"
+
+if [ -n "$security_scan_block" ]; then
+  pass "security-scan job exists"
+else
+  fail "security-scan job does not exist"
+fi
+
+if echo "$security_scan_block" | grep -qE 'if:.*inputs\.enable-security'; then
+  pass "security-scan job is gated by inputs.enable-security"
+else
+  fail "security-scan job is not gated by inputs.enable-security"
+fi
+
+# --- Security scan: SARIF permissions + upload ---
+
+if echo "$security_scan_block" | grep -qE 'security-events:\s*write'; then
+  pass "security-scan job has security-events: write permission"
+else
+  fail "security-scan job does not have security-events: write permission"
+fi
+
+if echo "$security_scan_block" | grep -q 'github/codeql-action/upload-sarif'; then
+  pass "security-scan job uploads SARIF via codeql-action"
+else
+  fail "security-scan job does not upload SARIF via codeql-action"
+fi
+
+# --- Security scan: invokes the scanner via nix run github: + workflow_sha pin ---
+
+if echo "$security_scan_block" | grep -q 'nix run "github:Cambridge-Vision-Technology/ci'; then
+  pass "security-scan invokes nix run github:Cambridge-Vision-Technology/ci"
+else
+  fail "security-scan does not invoke nix run github:Cambridge-Vision-Technology/ci"
+fi
+
+if echo "$security_scan_block" | grep -q 'github.workflow_sha'; then
+  pass "security-scan pins scanner to github.workflow_sha"
+else
+  fail "security-scan does not pin scanner to github.workflow_sha"
+fi
+
+# --- Security scan: job summary + SBOM submission ---
+
+if echo "$security_scan_block" | grep -q 'GITHUB_STEP_SUMMARY'; then
+  pass "security-scan writes to GITHUB_STEP_SUMMARY"
+else
+  fail "security-scan does not write to GITHUB_STEP_SUMMARY"
+fi
+
+if echo "$security_scan_block" | grep -qi 'spdx-dependency-submission-action'; then
+  pass "security-scan submits SBOM via spdx-dependency-submission-action"
+else
+  fail "security-scan does not submit SBOM"
+fi
+
+# --- Security scan: fails the job when scanner reports findings ---
+
+if echo "$security_scan_block" | grep -qE "steps\.scan\.outcome == 'failure'"; then
+  pass "security-scan fails when scanner reports un-suppressed findings"
+else
+  fail "security-scan does not fail when scanner reports un-suppressed findings"
+fi
+
+# --- Security scan: success.needs includes security-scan ---
+
+if grep -A3 '^  success:' "$WORKFLOW" | grep -qE 'needs:.*security-scan'; then
+  pass "success.needs includes security-scan"
+else
+  fail "success.needs does not include security-scan"
+fi
+
+# --- Security scan: all jobs timeout-minutes check already covers this (generic check above) ---
+
 # --- Summary ---
 
 echo ""

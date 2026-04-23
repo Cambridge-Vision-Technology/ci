@@ -49,6 +49,7 @@ Replace `$YOURORG` with your GitHub organisation or user.
 | `enable-ssh-agent` | Whether to enable [`webfactory/ssh-agent`][ssh-agent] in the workflow. If you set this to `true` you need to supply a secret named `ssh-private-key`. | `false`                                                                          |
 | `enable-lfs`       | Whether to enable Git LFS when checking out the repository. Set to `true` if your repository uses Git LFS for large files.                            | `false`                                                                          |
 | `check-dev-shells` | Whether to validate devShells by running `nix develop --command true`. Set to `false` if your devShells are expensive or unavailable on some systems. | `true`                                                                           |
+| `enable-security`  | Run the central security scan (gitleaks + trivy + semgrep + syft). Outputs SARIF to Code Scanning, summary to Actions, SBOM to Dependency graph.      | `false`                                                                          |
 | `directory`        | The root directory of your flake.                                                                                                                     | `.`                                                                              |
 | `fail-fast`        | Whether to cancel all in-progress jobs if any matrix job fails                                                                                        | `true`                                                                           |
 | `runner-map`       | A custom mapping of [Nix system types][nix-system] to desired Actions runners                                                                         | `{ "aarch64-darwin": "macos-arm64-nix-darwin", "x86_64-linux": "x86_64-linux" }` |
@@ -131,6 +132,60 @@ jobs:
       id-token: write
     with:
       fail-fast: false
+```
+
+#### Security scanning
+
+Opt in to the central security scan by passing `enable-security: true`. This runs:
+
+- [**gitleaks**](https://github.com/gitleaks/gitleaks) — secret detection against the working tree
+- [**trivy**](https://github.com/aquasecurity/trivy) — dependency CVEs + secrets + misconfig
+- [**semgrep**](https://semgrep.dev/) — SAST (`p/default` + `p/owasp-top-ten` rulesets)
+- [**syft**](https://github.com/anchore/syft) — SBOM generation (CycloneDX + SPDX)
+
+Findings surface in three places:
+
+- **Code Scanning tab** — SARIF from every scanner, one row per finding, annotations in PR diffs
+- **Actions job summary** — markdown table of findings per scanner
+- **Dependency graph** — SBOM populates the repo's dependencies view
+
+```yaml
+jobs:
+  CI:
+    uses: Cambridge-Vision-Technology/ci/.github/workflows/workflow.yml@main
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+    with:
+      enable-security: true
+```
+
+Developers run the same scanner locally from any repo root:
+
+```bash
+nix run github:Cambridge-Vision-Technology/ci#security-scan
+```
+
+Outputs land in `./out/security/` (SARIF, SBOM, summary).
+
+##### Handling false positives
+
+Inline markers (preferred — co-located with the code):
+
+```javascript
+// rationale: AWS documentation example credentials; non-functional placeholders.
+// nosemgrep
+AWS_ACCESS_KEY_ID: "AKIAIOSFODNN7EXAMPLE", // gitleaks:allow
+```
+
+File-based ignores at repo root (`.gitleaksignore`, `.semgrepignore`, `.trivyignore`) — each
+entry **must** be preceded by a `# rationale:` comment. CI fails if any entry lacks one:
+
+```
+# .gitleaksignore
+# rationale: historical recorded API responses, already rotated
+abc123def456:path/to/file.json:generic-api-key:42
 ```
 
 ## Notes
