@@ -284,17 +284,17 @@ jobs:
         id: scan
         working-directory: ${{ inputs.directory }}
         continue-on-error: true
-        env:
-          WORKFLOW_REF: ${{ github.workflow_ref }}
-        # NOTE: WORKFLOW_REF is the full caller-side reference to THIS reusable
-        # workflow, e.g. `owner/repo/.github/workflows/workflow.yml@feat/xyz`.
-        # We split on `@` to recover the branch/tag/SHA and reuse it to fetch
-        # the matching scanner app from the ci flake, so consumers pinning
-        # `@v1.2.3` or `@main` get the scanner matching that workflow version.
+        # NOTE: the scanner ref is pinned to `main` here rather than derived
+        # from the reusable-workflow's own ref. Neither `github.workflow_ref`
+        # (caller-side ref) nor `github.job_workflow_sha` (empty in our
+        # cross-repo workflow_call) gave a reliable handle to the callee's
+        # commit. Pinning to `main` means consumers always get the latest
+        # released scanner — acceptable for an opt-in security check whose
+        # rules should stay current.
+        # TODO(pilot): temporarily `feat/security-scanning` while ci#13 is
+        # in review. Flip to `main` before merging #13.
         run: |
-          ref="${WORKFLOW_REF##*@}"
-          echo "Scanner ref resolved to: ${ref}"
-          nix run "github:Cambridge-Vision-Technology/ci?ref=${ref}#security-scan" -- .
+          nix run "github:Cambridge-Vision-Technology/ci/feat/security-scanning#security-scan" -- .
       - name: Upload SARIF to Code Scanning
         if: always()
         uses: github/codeql-action/upload-sarif@v3
