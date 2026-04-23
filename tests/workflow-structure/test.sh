@@ -332,10 +332,10 @@ else
   fail "security-scan does not invoke nix run github:Cambridge-Vision-Technology/ci"
 fi
 
-if echo "$security_scan_block" | grep -q 'github.workflow_sha'; then
-  pass "security-scan pins scanner to github.workflow_sha"
+if echo "$security_scan_block" | grep -q 'github.job_workflow_sha'; then
+  pass "security-scan pins scanner to github.job_workflow_sha"
 else
-  fail "security-scan does not pin scanner to github.workflow_sha"
+  fail "security-scan does not pin scanner to github.job_workflow_sha"
 fi
 
 # --- Security scan: job summary + SBOM submission ---

@@ -284,11 +284,11 @@ jobs:
         id: scan
         working-directory: ${{ inputs.directory }}
         continue-on-error: true
-        # NOTE: `github.workflow_sha` pins the scanner to the exact commit of
+        # NOTE: `github.job_workflow_sha` pins the scanner to the exact commit of
         # the workflow.yml being executed, so consumers pinning `@v1.2.3` or
         # `@main` get the scanner matching that workflow version.
         run: |
-          nix run "github:Cambridge-Vision-Technology/ci?ref=${{ github.workflow_sha }}#security-scan" -- .
+          nix run "github:Cambridge-Vision-Technology/ci?ref=${{ github.job_workflow_sha }}#security-scan" -- .
       - name: Upload SARIF to Code Scanning
         if: always()
         uses: github/codeql-action/upload-sarif@v3
