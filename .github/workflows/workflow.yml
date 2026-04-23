@@ -284,11 +284,17 @@ jobs:
         id: scan
         working-directory: ${{ inputs.directory }}
         continue-on-error: true
-        # NOTE: `github.job_workflow_sha` pins the scanner to the exact commit of
-        # the workflow.yml being executed, so consumers pinning `@v1.2.3` or
-        # `@main` get the scanner matching that workflow version.
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        # NOTE: WORKFLOW_REF is the full caller-side reference to THIS reusable
+        # workflow, e.g. `owner/repo/.github/workflows/workflow.yml@feat/xyz`.
+        # We split on `@` to recover the branch/tag/SHA and reuse it to fetch
+        # the matching scanner app from the ci flake, so consumers pinning
+        # `@v1.2.3` or `@main` get the scanner matching that workflow version.
         run: |
-          nix run "github:Cambridge-Vision-Technology/ci?ref=${{ github.job_workflow_sha }}#security-scan" -- .
+          ref="${WORKFLOW_REF##*@}"
+          echo "Scanner ref resolved to: ${ref}"
+          nix run "github:Cambridge-Vision-Technology/ci?ref=${ref}#security-scan" -- .
       - name: Upload SARIF to Code Scanning
         if: always()
         uses: github/codeql-action/upload-sarif@v3
