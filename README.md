@@ -145,9 +145,11 @@ Opt in to the central security scan by passing `enable-security: true`. This run
 
 Findings surface in three places:
 
-- **Code Scanning tab** — SARIF from every scanner, one row per finding, annotations in PR diffs
+- **Code Scanning tab** — SARIF from every scanner, one row per finding, annotations in PR diffs.
+  Requires Code Scanning to be enabled on the consumer repo (Settings → Code security → Code scanning).
+  If disabled, the SARIF files are still available as the `security-sarif` workflow artifact.
 - **Actions job summary** — markdown table of findings per scanner
-- **Workflow artifacts** — SBOM (CycloneDX + SPDX) uploaded as `security-sbom`, 30-day retention
+- **Workflow artifacts** — SARIF files (`security-sarif`) and SBOM (`security-sbom`, CycloneDX + SPDX), 30-day retention
 
 ```yaml
 jobs:

@@ -301,11 +301,25 @@ jobs:
         run: |
           nix run "github:Cambridge-Vision-Technology/ci/feat/security-scanning#security-scan" -- .
       - name: Upload SARIF to Code Scanning
+        # NOTE: `continue-on-error: true` so a repo without Code Scanning
+        # enabled (or without a GHAS seat) doesn't fail the security-scan
+        # job outright — the findings are still available as the
+        # `security-sarif` artifact below. To surface findings as PR
+        # annotations, enable Code Scanning at
+        # Settings → Code security → Code scanning on the consumer repo.
         if: always()
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: ${{ inputs.directory }}/out/security/
           category: ci-security-scan
+      - name: Upload SARIF as workflow artifact
+        if: always() && hashFiles(format('{0}/out/security/*.sarif', inputs.directory)) != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-sarif
+          path: ${{ inputs.directory }}/out/security/*.sarif
+          retention-days: 30
       - name: Publish summary to Actions
         if: always()
         working-directory: ${{ inputs.directory }}
