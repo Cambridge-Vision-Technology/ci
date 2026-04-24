@@ -17,22 +17,32 @@ A reviewer with no knowledge of the implementation can verify completion by chec
 
 Single phase; ~half a day total. One developer.
 
-### CHUNK 1 — Add failing BDD-style workflow tests
+### CHUNK 1 — Add failing BDD-style workflow assertions
 
-Add a new test directory `tests/authenticate-github/` with a `test.sh` (wired via `nix flake check` the same way existing tests are) that asserts the deliverable contract against `.github/workflows/workflow.yml`:
+**Extend `tests/workflow-structure/test.sh`** — do NOT create a new `tests/authenticate-github/` directory. `workflow-structure` is already the home for workflow-YAML contract assertions (step existence, regression guards, step-config checks). A new directory duplicates the `nix flake check` derivation wiring and slows the test suite for no gain.
+
+Add these assertions to `tests/workflow-structure/test.sh`:
 
 - A step named `Authenticate git / Nix to github.com` (or equivalent) **exists**.
 - That step has **no `if:` condition** referencing `enable-lfs`.
 - That step's `env` includes `GITHUB_TOKEN: ${{ github.token }}`.
 - That step's `run` block writes `${HOME}/.netrc`, `/tmp/netrc`, `~/.git-credentials`, and sets `credential.helper store`.
 - The old conditional step `Configure credentials for LFS` no longer exists (or has been renamed and ungated).
-- Regression guard: no `http.extraHeader` is set globally anywhere in the workflow.
+- Regression guard: no `http.extraHeader` is set globally anywhere in the workflow. (Note: the existing `Clean up stale git extraHeader config` step that *unsets* stale config must be preserved — assert presence, not absence.)
 
-Run `nix flake check` and confirm the new test file fails. Commit red tests.
+Run `nix flake check` and confirm the new assertions fail. Commit red tests.
 
 ### CHUNK 2 — Implement the unconditional auth step
 
-Modify `.github/workflows/workflow.yml` to replace `Configure credentials for LFS` with an unconditional `Authenticate git / Nix to github.com` step matching the sketch in the issue. Keep the existing `Create netrc for Nix` bootstrap step (or fold it in — developer's call) and the existing `netrc-file = /tmp/netrc` wiring to `determinate-nix-action`.
+Modify `.github/workflows/workflow.yml` to replace `Configure credentials for LFS` with an unconditional `Authenticate git / Nix to github.com` step matching the sketch in the issue. Fold the now-redundant `Create netrc for Nix` bootstrap step into the new step (the new step unconditionally writes `/tmp/netrc` itself, so the bootstrap is dead code — per CLAUDE.md "delete code; don't comment out"). Preserve:
+
+- The existing `Clean up stale git extraHeader config` step (regression guard for self-hosted runners carrying stale config from a previous workflow version).
+- The `netrc-file = /tmp/netrc` wiring to `determinate-nix-action`.
+- The existing `git-lfs` install + `Ensure LFS files are checked out` steps (gated on `enable-lfs`).
+
+The new step's `run` block must start with `set -euo pipefail` (CLAUDE.md shell-safety rule; existing steps in this workflow are inconsistent here — the new step should not repeat that lapse).
+
+The plan's statement "preserving existing LFS behavior" is slightly misleading: removing the `enable-lfs` guard means `~/.git-credentials` is now always written. That is the intended widening, not regression — call it out in the commit message.
 
 Run `nix run .#format-fix` then `nix flake check` — new tests + existing tests all green. Commit.
 
