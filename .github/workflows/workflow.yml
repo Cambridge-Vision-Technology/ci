@@ -140,6 +140,21 @@ jobs:
         with:
           lfs: ${{ inputs.enable-lfs }}
           fetch-depth: 0 # Full clone for LFS compatibility
+      - name: Authenticate git / Nix to github.com
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # ~/.netrc for the git CLI subprocess (and other tools that honour netrc)
+          printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > "${HOME}/.netrc"
+          chmod 600 "${HOME}/.netrc"
+          # /tmp/netrc for Nix (wired into determinate-nix-action via netrc-file)
+          printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > /tmp/netrc
+          chmod 600 /tmp/netrc
+          # git credential helper for any code path that ignores netrc
+          git config --global credential.helper store
+          echo "https://x-access-token:${GITHUB_TOKEN}@github.com" > "${HOME}/.git-credentials"
+          chmod 600 "${HOME}/.git-credentials"
       - name: Ensure LFS files are checked out
         if: ${{ inputs.enable-lfs }}
         run: |
@@ -165,23 +180,6 @@ jobs:
           else
             echo "ℹ️ No LFS files in repository"
           fi
-      - name: Create netrc for Nix
-        run: |
-          touch /tmp/netrc
-          chmod 600 /tmp/netrc
-      # Configure credentials for LFS - netrc for Nix's HTTP requests
-      # NOTE: Do NOT set git config --global http.extraHeader - it breaks Nix fetching public repos
-      - name: Configure credentials for LFS
-        if: ${{ inputs.enable-lfs }}
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          # Configure git credential helper for LFS operations
-          git config --global credential.helper store
-          echo "https://x-access-token:${GITHUB_TOKEN}@github.com" >> ~/.git-credentials
-          # Create netrc for Nix's HTTP requests (used by Nix for fetching)
-          echo "machine github.com login x-access-token password ${GITHUB_TOKEN}" > /tmp/netrc
-          chmod 600 /tmp/netrc
       - name: Clean up stale magic-nix-cache daemon
         run: pkill -f magic-nix-cache || true
       - uses: DeterminateSystems/determinate-nix-action@v3
