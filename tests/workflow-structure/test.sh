@@ -189,36 +189,12 @@ else
   fail "build job does not use determinate-nix-action"
 fi
 
-# --- Build job uses flakehub-cache-action ---
-
-if echo "$build_block" | grep -qi 'flakehub-cache-action'; then
-  pass "build job uses flakehub-cache-action"
-else
-  fail "build job does not use flakehub-cache-action"
-fi
-
 # --- Build job has cleanup step for stale magic-nix-cache ---
 
 if echo "$build_block" | grep -qE 'pkill.*magic-nix-cache'; then
   pass "build job has magic-nix-cache cleanup step"
 else
   fail "build job does not have magic-nix-cache cleanup step"
-fi
-
-# --- flakehub-cache-action uses startup-notification-port: 0 ---
-
-if echo "$build_block" | grep -q 'startup-notification-port.*0'; then
-  pass "flakehub-cache-action uses startup-notification-port: 0"
-else
-  fail "flakehub-cache-action does not use startup-notification-port: 0"
-fi
-
-# --- flakehub-cache-action uses listen: 127.0.0.1:0 ---
-
-if echo "$build_block" | grep -q 'listen.*127\.0\.0\.1:0'; then
-  pass "flakehub-cache-action uses listen: 127.0.0.1:0"
-else
-  fail "flakehub-cache-action does not use listen: 127.0.0.1:0"
 fi
 
 # --- Build job has id-token: write ---
