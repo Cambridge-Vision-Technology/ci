@@ -263,6 +263,105 @@ else
   fail "Validate devShells step does not have correct if condition"
 fi
 
+# --- Authenticate git / Nix to github.com: step exists (issue #14) ---
+
+if grep -qE 'name: Authenticate git / Nix to github\.com' "$WORKFLOW"; then
+  pass "Authenticate git / Nix to github.com step exists"
+else
+  fail "Authenticate git / Nix to github.com step does not exist"
+fi
+
+# --- Extract the Authenticate step block for further assertions ---
+
+authenticate_block=""
+in_step=false
+while IFS= read -r line; do
+  if [[ "$line" == *"name: Authenticate git / Nix to github.com"* ]]; then
+    in_step=true
+    authenticate_block+="$line"$'\n'
+    continue
+  fi
+  if $in_step; then
+    if [[ "$line" =~ ^[[:space:]]{6}-[[:space:]]+(name:|uses:) ]]; then
+      break
+    fi
+    authenticate_block+="$line"$'\n'
+  fi
+done < "$WORKFLOW"
+
+# --- Authenticate step is unconditional (no if: referencing enable-lfs) ---
+
+if echo "$authenticate_block" | grep -qE '^\s*if:.*enable-lfs'; then
+  fail "Authenticate step has an if: condition referencing enable-lfs (must be unconditional)"
+else
+  pass "Authenticate step has no if: enable-lfs guard"
+fi
+
+# --- Authenticate step env includes GITHUB_TOKEN: ${{ github.token }} ---
+
+if echo "$authenticate_block" | grep -qE 'GITHUB_TOKEN:[[:space:]]*\$\{\{[[:space:]]*github\.token[[:space:]]*\}\}'; then
+  pass "Authenticate step sets GITHUB_TOKEN: \${{ github.token }} in env"
+else
+  fail "Authenticate step does not set GITHUB_TOKEN: \${{ github.token }} in env"
+fi
+
+# --- Authenticate step writes ${HOME}/.netrc ---
+
+if echo "$authenticate_block" | grep -qE '\$\{?HOME\}?/\.netrc|~/.netrc'; then
+  pass "Authenticate step writes to \${HOME}/.netrc"
+else
+  fail "Authenticate step does not write to \${HOME}/.netrc"
+fi
+
+# --- Authenticate step writes /tmp/netrc ---
+
+if echo "$authenticate_block" | grep -q '/tmp/netrc'; then
+  pass "Authenticate step writes to /tmp/netrc"
+else
+  fail "Authenticate step does not write to /tmp/netrc"
+fi
+
+# --- Authenticate step writes ~/.git-credentials ---
+
+if echo "$authenticate_block" | grep -qE '~/\.git-credentials|\$\{?HOME\}?/\.git-credentials'; then
+  pass "Authenticate step writes to ~/.git-credentials"
+else
+  fail "Authenticate step does not write to ~/.git-credentials"
+fi
+
+# --- Authenticate step configures credential.helper store ---
+
+if echo "$authenticate_block" | grep -qE 'credential\.helper[[:space:]]+store'; then
+  pass "Authenticate step sets credential.helper store"
+else
+  fail "Authenticate step does not set credential.helper store"
+fi
+
+# --- Old conditional 'Configure credentials for LFS' step is removed ---
+
+if grep -qE 'name: Configure credentials for LFS' "$WORKFLOW"; then
+  fail "old 'Configure credentials for LFS' step still exists (should be removed/renamed)"
+else
+  pass "old 'Configure credentials for LFS' step has been removed"
+fi
+
+# --- Regression guard: no git config --global http.extraHeader (setting) ---
+
+extra_header_hits="$(grep -E 'git config --global[^|]*http\..*\.extraHeader' "$WORKFLOW" | grep -vE -- '--unset' || true)"
+if [ -n "$extra_header_hits" ]; then
+  fail "workflow sets git config --global http.extraHeader (regression)"
+else
+  pass "workflow does not set git config --global http.extraHeader"
+fi
+
+# --- Preserve existing 'Clean up stale git extraHeader config' step ---
+
+if grep -qE 'name: Clean up stale git extraHeader config' "$WORKFLOW"; then
+  pass "'Clean up stale git extraHeader config' step is preserved"
+else
+  fail "'Clean up stale git extraHeader config' step is missing (must be preserved)"
+fi
+
 # --- Summary ---
 
 echo ""
