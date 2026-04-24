@@ -17,7 +17,9 @@ A reviewer with no knowledge of the implementation can verify completion by chec
 
 Single phase; ~half a day total. One developer.
 
-### CHUNK 1 — Add failing BDD-style workflow assertions
+### CHUNK 1 — Add failing BDD-style workflow assertions ✅ **Done.**
+
+> Note: required a preparatory commit (`3142f77`) to remove obsolete flakehub-cache-action assertions that predated the auth work — those failures were unrelated to #14 and were dropped because flakehub-cache-action was intentionally removed in `0df45d0`.
 
 **Extend `tests/workflow-structure/test.sh`** — do NOT create a new `tests/authenticate-github/` directory. `workflow-structure` is already the home for workflow-YAML contract assertions (step existence, regression guards, step-config checks). A new directory duplicates the `nix flake check` derivation wiring and slows the test suite for no gain.
 
@@ -32,7 +34,9 @@ Add these assertions to `tests/workflow-structure/test.sh`:
 
 Run `nix flake check` and confirm the new assertions fail. Commit red tests.
 
-### CHUNK 2 — Implement the unconditional auth step
+### CHUNK 2 — Implement the unconditional auth step ✅ **Done.**
+
+> Note: `~/.git-credentials` is now always written, not just when `enable-lfs: true`. Intentional widening (previously the file was only written under the LFS gate).
 
 Modify `.github/workflows/workflow.yml` to replace `Configure credentials for LFS` with an unconditional `Authenticate git / Nix to github.com` step matching the sketch in the issue. Fold the now-redundant `Create netrc for Nix` bootstrap step into the new step (the new step unconditionally writes `/tmp/netrc` itself, so the bootstrap is dead code — per CLAUDE.md "delete code; don't comment out"). Preserve:
 
@@ -46,7 +50,9 @@ The plan's statement "preserving existing LFS behavior" is slightly misleading: 
 
 Run `nix run .#format-fix` then `nix flake check` — new tests + existing tests all green. Commit.
 
-### CHUNK 3 — Live verification via blackbriar#222
+### CHUNK 3 — Live verification via blackbriar#222 ✅ **Done.**
+
+> Note: blackbriar#222 auto-merged with the temporary `@issue-14-authenticate-git-cli` pin in place while verification was running, so `blackbriar/main` briefly pointed at this branch. Revert PR opened as blackbriar#227. Verification run: https://github.com/Cambridge-Vision-Technology/blackbriar/actions/runs/24876784289
 
 Push branch; the draft PR's own validate.yml runs end-to-end on x86_64-linux and aarch64-darwin runners — confirm green.
 
