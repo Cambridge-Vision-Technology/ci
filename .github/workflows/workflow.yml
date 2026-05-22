@@ -106,6 +106,23 @@ jobs:
       id-token: write
 
     steps:
+      # NOTE on the setup composite at setup/action.yml: that action
+      # exists for BESPOKE workflows in other repos to consume directly
+      # (e.g. a `tofu plan` job that needs auth + ssh-agent but isn't
+      # shaped like a flake-check). It is NOT dogfooded by workflow.yml
+      # because GHA's interaction between reusable-workflows and local-
+      # action references has constraints that don't survive cross-repo
+      # consumption — `uses: ./setup` resolves via the workspace
+      # (CALLER's repo, not cvt-ci); `uses: cvt-ci/setup@${{ github.workflow_sha }}`
+      # has an empty workflow_sha when the outer trigger isn't itself a
+      # reusable-workflow call; @main pinning would mean PR validation
+      # tests the OLD composite, not the new one in the PR.
+      #
+      # So workflow.yml duplicates the setup steps inline. The duplication
+      # is tested for parity by tests/workflow-structure/test.sh +
+      # tests/setup-action-structure/test.sh — if the two drift,
+      # contract assertions fail loud. Single-source-of-truth is the
+      # ideal; cross-repo GHA semantics make it infeasible here.
       # Clean up stale git config from previous runs on self-hosted runners
       # A previous workflow version set http.extraHeader globally, which persists
       # and causes "Duplicate header: Authorization" errors with actions/checkout
