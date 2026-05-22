@@ -16,8 +16,16 @@ jobs:
         uses: actions/checkout@v4
       - uses: DeterminateSystems/determinate-nix-action@v3
       - uses: DeterminateSystems/flakehub-cache-action@main
+      # actionlint lints workflow files only — composite action.yml has a
+      # different schema (`runs.using: composite`) that actionlint rejects.
+      # The composite is validated at runtime by the `setup-composite-smoke`
+      # job + the structural assertions in tests/setup-action-structure/.
       - run: nix run nixpkgs#actionlint -- ./.github/workflows/workflow.yml ./.github/workflows/validate.yml
-      - run: nix run nixpkgs#nodePackages.prettier -- --check .
+      # NOTE: was `nixpkgs#nodePackages.prettier` until 2026-05; nixpkgs
+      # unstable removed the `nodePackages` set so prettier moved to the
+      # top level. Fixed as part of this PR because it blocks the lints
+      # job on every run otherwise.
+      - run: nix run nixpkgs#prettier -- --check .
 
   ci:
     uses: ./.github/workflows/workflow.yml
@@ -28,3 +36,55 @@ jobs:
       directory: ./tests/smoke
       # NOTE: This repo's own CI uses GitHub-hosted runners, not the org self-hosted defaults
       runner-map: '{"x86_64-linux": "ubuntu-latest", "aarch64-darwin": "macos-latest"}'
+
+  # Smoke test for the setup composite when consumed STANDALONE (not via
+  # workflow.yml). Validates that bespoke per-repo workflows can `uses:`
+  # the composite directly — covers the use case the extraction was done
+  # for. If this passes, downstream consumers (e.g. infra's
+  # state-plan-on-pr.yml) get a working setup phase without copying
+  # ~100 lines of inline shell.
+  setup-composite-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./setup
+        with:
+          checkout: "false" # already checked out above
+      - name: Verify authenticated git clone over HTTPS works
+        run: |
+          set -euo pipefail
+          # Clone *this* repo — GITHUB_TOKEN is scoped to the workflow's own
+          # repository, so cross-repo clones (even within the same org) fail
+          # with "Repository not found". A self-clone exercises the netrc /
+          # credential-helper paths set up by the composite without needing
+          # additional permissions.
+          tmp="$(mktemp -d)"
+          git clone --depth 1 https://github.com/${{ github.repository }} "$tmp/self"
+          test -f "$tmp/self/README.md"
+      - name: Verify Nix is on PATH
+        run: nix --version
+      - name: Verify netrc surfaces exist with mode 600
+        run: |
+          set -euo pipefail
+          # `stat -f` means different things on BSD (format) vs GNU (filesystem
+          # info) — `2>/dev/null || fallback` doesn't disambiguate because GNU
+          # stat succeeds with -f and returns the wrong output. Branch on
+          # $RUNNER_OS (always Linux / macOS / Windows under GHA) instead.
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            stat_cmd='stat -f %Lp'
+          else
+            stat_cmd='stat -c %a'
+          fi
+          for f in "$HOME/.netrc" /tmp/netrc "$HOME/.git-credentials"; do
+            test -f "$f" || { echo "missing: $f" >&2; exit 1; }
+            perms=$($stat_cmd "$f")
+            [[ "$perms" == "600" ]] || { echo "$f has perms $perms, expected 600" >&2; exit 1; }
+          done

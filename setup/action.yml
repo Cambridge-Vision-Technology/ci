@@ -1,0 +1,175 @@
+name: "Nix CI setup"
+description: |
+  Reusable setup composite for Nix-based CI: cleans stale git config,
+  optionally installs git-lfs, checks out the repo, authenticates the
+  git CLI + Nix to github.com via netrc (avoiding rate limits on
+  transitive `builtins.fetchGit`), installs Determinate Nix, and
+  optionally starts ssh-agent + adds GitHub SSH host keys so SSH-form
+  `git clone git@github.com:…` calls succeed inside the job.
+
+  Composite extracted from this repo's own `.github/workflows/workflow.yml`
+  so that bespoke per-repo workflows (e.g. a `tofu plan` job that needs
+  the same auth surface but isn't shaped like a flake-check) can reuse
+  the setup phase without recreating it inline.
+
+  Default behaviour matches what `workflow.yml`'s `build` job did before
+  the extraction — calling this with all defaults is a drop-in replacement.
+
+inputs:
+  enable-ssh-agent:
+    description: |
+      Whether to start [`webfactory/ssh-agent`](https://github.com/webfactory/ssh-agent)
+      and add GitHub SSH host keys so SSH-form `git clone git@github.com:…`
+      works inside the job. If `'true'`, you must also pass `ssh-private-key`.
+    required: false
+    default: "false"
+  ssh-private-key:
+    description: |
+      The SSH private key (sensitive — pass via the secrets context using
+      the standard `secrets.YOUR_KEY_NAME` reference at the call site,
+      never inline). Loaded into ssh-agent when enable-ssh-agent is 'true'.
+      Ignored otherwise.
+    required: false
+    default: ""
+  enable-lfs:
+    description: |
+      Whether to install git-lfs (Linux + macOS variants), enable LFS at
+      checkout, and verify that the first LFS file is smudged (not a pointer).
+      Required when the repo uses Git LFS for fixtures or images.
+    required: false
+    default: "false"
+  fetch-depth:
+    description: |
+      Forwarded to `actions/checkout@v4`. Defaults to `'0'` (full history) for
+      LFS compatibility — the existing `workflow.yml` behaviour. Override
+      with `'1'` for shallow clones if LFS is disabled and you want speed.
+    required: false
+    default: "0"
+  checkout:
+    description: |
+      Whether the composite should run `actions/checkout@v4` itself. Default
+      `'true'` matches the historical workflow.yml UX. Set to `'false'` if
+      the caller has already done its own checkout (e.g. with non-default
+      `path:` or `repository:` inputs) and just wants the auth + Nix setup.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    # Clean up stale git config from previous runs on self-hosted runners.
+    # A previous workflow version set http.extraHeader globally, which
+    # persists and causes "Duplicate header: Authorization" errors with
+    # actions/checkout. Unconditional — runs even if checkout is disabled.
+    - name: Clean up stale git extraHeader config
+      shell: bash
+      run: git config --global --unset-all http.https://github.com/.extraHeader || true
+
+    - name: Install git-lfs (Linux)
+      if: ${{ inputs.enable-lfs == 'true' && runner.os == 'Linux' }}
+      shell: bash
+      run: |
+        if ! command -v git-lfs &> /dev/null; then
+          # Download git-lfs from GitHub releases (works on Nix-based runners without sudo)
+          curl -sL https://github.com/git-lfs/git-lfs/releases/download/v3.6.1/git-lfs-linux-amd64-v3.6.1.tar.gz | tar xz
+          mkdir -p "$HOME/.local/bin"
+          mv git-lfs-3.6.1/git-lfs "$HOME/.local/bin/"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+        fi
+        git lfs install --force
+
+    - name: Install git-lfs (macOS)
+      if: ${{ inputs.enable-lfs == 'true' && runner.os == 'macOS' }}
+      shell: bash
+      run: |
+        if ! command -v git-lfs &> /dev/null; then
+          # Download git-lfs from GitHub releases (works without brew)
+          curl -sL https://github.com/git-lfs/git-lfs/releases/download/v3.6.1/git-lfs-darwin-arm64-v3.6.1.zip -o git-lfs.zip
+          unzip -q git-lfs.zip
+          mkdir -p "$HOME/.local/bin"
+          mv git-lfs-3.6.1/git-lfs "$HOME/.local/bin/"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+        fi
+        git lfs install --force
+
+    - name: Checkout repository
+      if: ${{ inputs.checkout == 'true' }}
+      uses: actions/checkout@v4
+      with:
+        lfs: ${{ inputs.enable-lfs == 'true' }}
+        fetch-depth: ${{ inputs.fetch-depth }}
+
+    - name: Authenticate git / Nix to github.com
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        # ~/.netrc for the git CLI subprocess (and other tools that honour netrc)
+        printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > "${HOME}/.netrc"
+        chmod 600 "${HOME}/.netrc"
+        # /tmp/netrc for Nix (wired into determinate-nix-action via netrc-file)
+        printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > /tmp/netrc
+        chmod 600 /tmp/netrc
+        # git credential helper for any code path that ignores netrc
+        git config --global credential.helper store
+        echo "https://x-access-token:${GITHUB_TOKEN}@github.com" > "${HOME}/.git-credentials"
+        chmod 600 "${HOME}/.git-credentials"
+
+    - name: Ensure LFS files are checked out
+      if: ${{ inputs.enable-lfs == 'true' }}
+      shell: bash
+      run: |
+        echo "Running git lfs checkout..."
+        git lfs checkout
+        echo "Running git lfs pull to ensure all objects are fetched..."
+        git lfs pull
+        # Verify LFS files are actually smudged (not pointers)
+        if git lfs ls-files | head -1 | grep -q '^'; then
+          echo "✅ LFS files present"
+          # Detect pointers by header string, not size — small smudged blobs are valid
+          first_lfs_file=$(git lfs ls-files | head -1 | cut -d' ' -f3-)
+          if [ -n "$first_lfs_file" ] && [ -f "$first_lfs_file" ]; then
+            if head -c 100 "$first_lfs_file" | grep -q '^version https://git-lfs.github.com/spec/v1'; then
+              echo "❌ LFS file '$first_lfs_file' appears to be an unsmudged pointer"
+              head -c 200 "$first_lfs_file"
+              exit 1
+            else
+              file_size=$(wc -c < "$first_lfs_file")
+              echo "✅ LFS file '$first_lfs_file' is smudged (${file_size} bytes)"
+            fi
+          fi
+        else
+          echo "ℹ️ No LFS files in repository"
+        fi
+
+    - name: Clean up stale magic-nix-cache daemon
+      shell: bash
+      run: pkill -f magic-nix-cache || true
+
+    - name: Install Determinate Nix
+      uses: DeterminateSystems/determinate-nix-action@v3
+      with:
+        extra-conf: |
+          netrc-file = /tmp/netrc
+
+    - name: Start ssh-agent
+      if: ${{ inputs.enable-ssh-agent == 'true' }}
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ inputs.ssh-private-key }}
+
+    - name: Add GitHub SSH host keys
+      if: ${{ inputs.enable-ssh-agent == 'true' }}
+      shell: bash
+      run: |
+        mkdir -p ~/.ssh
+        {
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+          echo "github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg="
+          echo "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Ny"
+        } >> ~/.ssh/known_hosts
+        echo "NIX_SSHOPTS=-o UserKnownHostsFile=$HOME/.ssh/known_hosts" >> "$GITHUB_ENV"
+        echo "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=$HOME/.ssh/known_hosts" >> "$GITHUB_ENV"

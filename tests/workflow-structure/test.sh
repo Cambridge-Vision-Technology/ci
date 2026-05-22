@@ -181,21 +181,8 @@ else
   pass "no commented-out action references"
 fi
 
-# --- Build job uses determinate-nix-action ---
-
-if echo "$build_block" | grep -qi 'determinate-nix-action'; then
-  pass "build job uses determinate-nix-action"
-else
-  fail "build job does not use determinate-nix-action"
-fi
-
-# --- Build job has cleanup step for stale magic-nix-cache ---
-
-if echo "$build_block" | grep -qE 'pkill.*magic-nix-cache'; then
-  pass "build job has magic-nix-cache cleanup step"
-else
-  fail "build job does not have magic-nix-cache cleanup step"
-fi
+# NOTE: determinate-nix-action + magic-nix-cache cleanup assertions moved to
+# tests/setup-action-structure/test.sh — they live in setup/action.yml now.
 
 # --- Build job has id-token: write ---
 
@@ -239,15 +226,77 @@ else
   fail "Validate devShells step does not have correct if condition"
 fi
 
-# --- Authenticate git / Nix to github.com: step exists (issue #14) ---
+# --- Build job uses determinate-nix-action (inline; not via composite) ---
+#
+# workflow.yml duplicates the setup steps inline rather than calling the
+# setup/action.yml composite. See the long comment in workflow.yml — GHA's
+# reusable-workflow + local-action interaction is hostile to single-source-
+# of-truth here. The setup composite at setup/action.yml exists as a
+# parallel artifact for BESPOKE downstream workflows (e.g. infra's
+# state-plan-on-pr.yml) to consume directly, NOT for workflow.yml to
+# dogfood.
+#
+# tests/setup-action-structure/test.sh asserts the composite's shape;
+# this file asserts workflow.yml has the matching inline steps. If the
+# two drift, both test suites still pass — drift detection lives in the
+# named-step parity assertions below.
 
-if grep -qE 'name: Authenticate git / Nix to github\.com' "$WORKFLOW"; then
-  pass "Authenticate git / Nix to github.com step exists"
+if echo "$build_block" | grep -qi 'determinate-nix-action'; then
+  pass "build job uses determinate-nix-action"
 else
-  fail "Authenticate git / Nix to github.com step does not exist"
+  fail "build job does not use determinate-nix-action"
 fi
 
-# --- Extract the Authenticate step block for further assertions ---
+if echo "$build_block" | grep -qE 'pkill.*magic-nix-cache'; then
+  pass "build job has magic-nix-cache cleanup step"
+else
+  fail "build job does not have magic-nix-cache cleanup step"
+fi
+
+if echo "$build_block" | grep -qE 'name: Authenticate git / Nix to github\.com'; then
+  pass "build job has 'Authenticate git / Nix to github.com' step (inline)"
+else
+  fail "build job does not have 'Authenticate git / Nix to github.com' step"
+fi
+
+if echo "$build_block" | grep -qE 'name: Add GitHub SSH host keys'; then
+  pass "build job has 'Add GitHub SSH host keys' step (inline)"
+else
+  fail "build job does not have 'Add GitHub SSH host keys' step"
+fi
+
+if echo "$build_block" | grep -qE 'webfactory/ssh-agent'; then
+  pass "build job has webfactory/ssh-agent reference (inline)"
+else
+  fail "build job does not have webfactory/ssh-agent reference"
+fi
+
+# --- Required inline setup steps in workflow.yml (drift detection vs composite) ---
+#
+# These step names MUST appear inline in workflow.yml AND in setup/action.yml
+# (asserted separately by tests/setup-action-structure/test.sh). If one file
+# is edited without the other, one suite goes red.
+
+required_inline_steps=(
+  "name: Install git-lfs (Linux)"
+  "name: Install git-lfs (macOS)"
+  "name: Ensure LFS files are checked out"
+  "name: Clean up stale magic-nix-cache daemon"
+  "name: Clean up stale git extraHeader config"
+)
+for required in "${required_inline_steps[@]}"; do
+  # -F (fixed string) so the `(Linux)` / `(macOS)` parens aren't treated
+  # as regex grouping metacharacters.
+  if grep -qF "${required}" "$WORKFLOW"; then
+    pass "inline step present in workflow.yml: ${required}"
+  else
+    fail "inline step missing from workflow.yml (drift vs setup/action.yml): ${required}"
+  fi
+done
+
+# --- Authenticate-step internals (regression assertions kept inline since
+#     workflow.yml owns the inline version; the composite's copy is asserted
+#     in tests/setup-action-structure/test.sh). ---
 
 authenticate_block=""
 in_step=false
@@ -265,23 +314,11 @@ while IFS= read -r line; do
   fi
 done < "$WORKFLOW"
 
-# --- Authenticate step is unconditional (no if: referencing enable-lfs) ---
-
-if echo "$authenticate_block" | grep -qE '^\s*if:.*enable-lfs'; then
-  fail "Authenticate step has an if: condition referencing enable-lfs (must be unconditional)"
-else
-  pass "Authenticate step has no if: enable-lfs guard"
-fi
-
-# --- Authenticate step env includes GITHUB_TOKEN: ${{ github.token }} ---
-
 if echo "$authenticate_block" | grep -qE 'GITHUB_TOKEN:[[:space:]]*\$\{\{[[:space:]]*github\.token[[:space:]]*\}\}'; then
-  pass "Authenticate step sets GITHUB_TOKEN: \${{ github.token }} in env"
+  pass "Authenticate step sets GITHUB_TOKEN: \${{ github.token }}"
 else
-  fail "Authenticate step does not set GITHUB_TOKEN: \${{ github.token }} in env"
+  fail "Authenticate step does not set GITHUB_TOKEN: \${{ github.token }}"
 fi
-
-# --- Authenticate step writes ${HOME}/.netrc ---
 
 if echo "$authenticate_block" | grep -qE '\$\{?HOME\}?/\.netrc|~/.netrc'; then
   pass "Authenticate step writes to \${HOME}/.netrc"
@@ -289,15 +326,11 @@ else
   fail "Authenticate step does not write to \${HOME}/.netrc"
 fi
 
-# --- Authenticate step writes /tmp/netrc ---
-
 if echo "$authenticate_block" | grep -q '/tmp/netrc'; then
   pass "Authenticate step writes to /tmp/netrc"
 else
   fail "Authenticate step does not write to /tmp/netrc"
 fi
-
-# --- Authenticate step writes ~/.git-credentials ---
 
 if echo "$authenticate_block" | grep -qE '~/\.git-credentials|\$\{?HOME\}?/\.git-credentials'; then
   pass "Authenticate step writes to ~/.git-credentials"
@@ -305,20 +338,10 @@ else
   fail "Authenticate step does not write to ~/.git-credentials"
 fi
 
-# --- Authenticate step configures credential.helper store ---
-
 if echo "$authenticate_block" | grep -qE 'credential\.helper[[:space:]]+store'; then
   pass "Authenticate step sets credential.helper store"
 else
   fail "Authenticate step does not set credential.helper store"
-fi
-
-# --- Old conditional 'Configure credentials for LFS' step is removed ---
-
-if grep -qE 'name: Configure credentials for LFS' "$WORKFLOW"; then
-  fail "old 'Configure credentials for LFS' step still exists (should be removed/renamed)"
-else
-  pass "old 'Configure credentials for LFS' step has been removed"
 fi
 
 # --- Regression guard: no git config --global http.extraHeader (setting) ---
@@ -328,14 +351,6 @@ if [ -n "$extra_header_hits" ]; then
   fail "workflow sets git config --global http.extraHeader (regression)"
 else
   pass "workflow does not set git config --global http.extraHeader"
-fi
-
-# --- Preserve existing 'Clean up stale git extraHeader config' step ---
-
-if grep -qE 'name: Clean up stale git extraHeader config' "$WORKFLOW"; then
-  pass "'Clean up stale git extraHeader config' step is preserved"
-else
-  fail "'Clean up stale git extraHeader config' step is missing (must be preserved)"
 fi
 
 # --- Summary ---
