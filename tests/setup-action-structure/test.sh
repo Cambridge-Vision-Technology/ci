@@ -96,7 +96,7 @@ fi
 required_steps=(
   "Clean up stale git extraHeader config"
   "Authenticate git / Nix to github.com"
-  "Clean up stale magic-nix-cache daemon"
+  "Configure Nix netrc-file"
   "Add GitHub SSH host keys"
 )
 for step_name in "${required_steps[@]}"; do
@@ -203,12 +203,52 @@ else
   fail "Install git-lfs (macOS) step missing"
 fi
 
-# --- determinate-nix-action step is configured with netrc-file ---
+# --- Regression guard: no DeterminateSystems / magic-nix-cache references ---
+#
+# Self-hosted runners have Nix permanently installed via nix-darwin; the
+# composite no longer installs Nix. magic-nix-cache was the source of the
+# port-50232 cache-proxy crashes that motivated this removal.
 
-if grep -A5 'DeterminateSystems/determinate-nix-action' "$ACTION" | grep -qE 'netrc-file[[:space:]]*=[[:space:]]*/tmp/netrc'; then
-  pass "Determinate Nix step wires netrc-file = /tmp/netrc"
+if grep -qiE 'DeterminateSystems/(determinate-nix-action|nix-installer-action|magic-nix-cache-action)' "$ACTION"; then
+  fail "action still references a DeterminateSystems Nix install action"
 else
-  fail "Determinate Nix step does not wire netrc-file = /tmp/netrc"
+  pass "action has no DeterminateSystems Nix install action references"
+fi
+
+if grep -qiE 'magic-nix-cache|flakehub-cache' "$ACTION"; then
+  fail "action still references magic-nix-cache or flakehub-cache"
+else
+  pass "action has no magic-nix-cache / flakehub-cache references"
+fi
+
+# --- Configure Nix netrc-file step writes the expected nix.conf entry ---
+
+netrc_step_block=""
+in_step=false
+while IFS= read -r line; do
+  if [[ "$line" == *"name: Configure Nix netrc-file"* ]]; then
+    in_step=true
+    netrc_step_block+="$line"$'\n'
+    continue
+  fi
+  if $in_step; then
+    if [[ "$line" =~ ^[[:space:]]*-[[:space:]]+(name:|uses:) ]]; then
+      break
+    fi
+    netrc_step_block+="$line"$'\n'
+  fi
+done < "$ACTION"
+
+if echo "$netrc_step_block" | grep -qE 'netrc-file[[:space:]]*=[[:space:]]*/tmp/netrc'; then
+  pass "Configure Nix netrc-file step writes 'netrc-file = /tmp/netrc'"
+else
+  fail "Configure Nix netrc-file step does not write 'netrc-file = /tmp/netrc'"
+fi
+
+if echo "$netrc_step_block" | grep -qE '\.config/nix/nix\.conf'; then
+  pass "Configure Nix netrc-file step writes to \$HOME/.config/nix/nix.conf"
+else
+  fail "Configure Nix netrc-file step does not write to \$HOME/.config/nix/nix.conf"
 fi
 
 # --- Summary ---

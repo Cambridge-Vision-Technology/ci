@@ -165,7 +165,9 @@ jobs:
           # ~/.netrc for the git CLI subprocess (and other tools that honour netrc)
           printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > "${HOME}/.netrc"
           chmod 600 "${HOME}/.netrc"
-          # /tmp/netrc for Nix (wired into determinate-nix-action via netrc-file)
+          # /tmp/netrc for Nix — wired into nix.conf via the "Configure Nix
+          # netrc-file" step below. The runner host also configures this at
+          # the daemon level (see ci-runner-mac modules/nix-cache.nix).
           printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > /tmp/netrc
           chmod 600 /tmp/netrc
           # git credential helper for any code path that ignores netrc
@@ -197,12 +199,18 @@ jobs:
           else
             echo "ℹ️ No LFS files in repository"
           fi
-      - name: Clean up stale magic-nix-cache daemon
-        run: pkill -f magic-nix-cache || true
-      - uses: DeterminateSystems/determinate-nix-action@v3
-        with:
-          extra-conf: |
-            netrc-file = /tmp/netrc
+      - name: Configure Nix netrc-file
+        # Self-hosted runners (the only supported target — see runner-map
+        # default) have Nix permanently installed via nix-darwin, so no
+        # install step is needed. We just wire user-scoped nix.conf to the
+        # job-local /tmp/netrc written above. Daemon-level netrc-file is
+        # set in the runner host's /etc/nix/nix.conf (ci-runner-mac).
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/nix"
+          if ! grep -qF "netrc-file = /tmp/netrc" "$HOME/.config/nix/nix.conf" 2>/dev/null; then
+            echo "netrc-file = /tmp/netrc" >> "$HOME/.config/nix/nix.conf"
+          fi
       - uses: webfactory/ssh-agent@v0.9.0
         if: ${{ inputs.enable-ssh-agent }}
         with:

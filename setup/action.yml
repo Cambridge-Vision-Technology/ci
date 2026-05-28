@@ -3,9 +3,14 @@ description: |
   Reusable setup composite for Nix-based CI: cleans stale git config,
   optionally installs git-lfs, checks out the repo, authenticates the
   git CLI + Nix to github.com via netrc (avoiding rate limits on
-  transitive `builtins.fetchGit`), installs Determinate Nix, and
-  optionally starts ssh-agent + adds GitHub SSH host keys so SSH-form
-  `git clone git@github.com:…` calls succeed inside the job.
+  transitive `builtins.fetchGit`), wires Nix's `netrc-file` setting so
+  Nix sees those credentials, and optionally starts ssh-agent + adds
+  GitHub SSH host keys so SSH-form `git clone git@github.com:…` calls
+  succeed inside the job.
+
+  Assumes Nix is already installed on the runner (the supported target
+  is self-hosted runners provisioned via the `ci-runner-mac` repo's
+  nix-darwin modules). Does NOT install Nix.
 
   Composite extracted from this repo's own `.github/workflows/workflow.yml`
   so that bespoke per-repo workflows (e.g. a `tofu plan` job that needs
@@ -110,7 +115,9 @@ runs:
         # ~/.netrc for the git CLI subprocess (and other tools that honour netrc)
         printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > "${HOME}/.netrc"
         chmod 600 "${HOME}/.netrc"
-        # /tmp/netrc for Nix (wired into determinate-nix-action via netrc-file)
+        # /tmp/netrc for Nix — wired into nix.conf via the "Configure Nix
+        # netrc-file" step below. The runner host also configures this at
+        # the daemon level (see ci-runner-mac modules/nix-cache.nix).
         printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > /tmp/netrc
         chmod 600 /tmp/netrc
         # git credential helper for any code path that ignores netrc
@@ -145,15 +152,19 @@ runs:
           echo "ℹ️ No LFS files in repository"
         fi
 
-    - name: Clean up stale magic-nix-cache daemon
+    - name: Configure Nix netrc-file
+      # Self-hosted runners (the only supported target — see workflow.yml's
+      # runner-map default) have Nix permanently installed via nix-darwin,
+      # so no install step is needed. We just wire user-scoped nix.conf to
+      # the job-local /tmp/netrc written above. Daemon-level netrc-file is
+      # set in the runner host's /etc/nix/nix.conf (ci-runner-mac).
       shell: bash
-      run: pkill -f magic-nix-cache || true
-
-    - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@v3
-      with:
-        extra-conf: |
-          netrc-file = /tmp/netrc
+      run: |
+        set -euo pipefail
+        mkdir -p "$HOME/.config/nix"
+        if ! grep -qF "netrc-file = /tmp/netrc" "$HOME/.config/nix/nix.conf" 2>/dev/null; then
+          echo "netrc-file = /tmp/netrc" >> "$HOME/.config/nix/nix.conf"
+        fi
 
     - name: Start ssh-agent
       if: ${{ inputs.enable-ssh-agent == 'true' }}

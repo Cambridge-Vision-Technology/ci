@@ -226,7 +226,7 @@ else
   fail "Validate devShells step does not have correct if condition"
 fi
 
-# --- Build job uses determinate-nix-action (inline; not via composite) ---
+# --- Build job uses inline setup (not via composite) ---
 #
 # workflow.yml duplicates the setup steps inline rather than calling the
 # setup/action.yml composite. See the long comment in workflow.yml — GHA's
@@ -241,16 +241,36 @@ fi
 # two drift, both test suites still pass — drift detection lives in the
 # named-step parity assertions below.
 
-if echo "$build_block" | grep -qi 'determinate-nix-action'; then
-  pass "build job uses determinate-nix-action"
+# --- Regression guard: no DeterminateSystems/magic-nix-cache references ---
+#
+# Self-hosted runners have Nix permanently installed via nix-darwin; we
+# don't install Nix per-job. magic-nix-cache was the source of the
+# port-50232 cache-proxy crashes that motivated this removal.
+
+if grep -qiE 'DeterminateSystems/(determinate-nix-action|nix-installer-action|magic-nix-cache-action)' "$WORKFLOW"; then
+  fail "workflow still references a DeterminateSystems Nix install action"
 else
-  fail "build job does not use determinate-nix-action"
+  pass "workflow has no DeterminateSystems Nix install action references"
 fi
 
-if echo "$build_block" | grep -qE 'pkill.*magic-nix-cache'; then
-  pass "build job has magic-nix-cache cleanup step"
+if grep -qiE 'magic-nix-cache|flakehub-cache' "$WORKFLOW"; then
+  fail "workflow still references magic-nix-cache or flakehub-cache"
 else
-  fail "build job does not have magic-nix-cache cleanup step"
+  pass "workflow has no magic-nix-cache / flakehub-cache references"
+fi
+
+# --- Build job has the netrc-file nix.conf wiring step ---
+
+if echo "$build_block" | grep -q 'Configure Nix netrc-file'; then
+  pass "build job has 'Configure Nix netrc-file' step"
+else
+  fail "build job does not have 'Configure Nix netrc-file' step"
+fi
+
+if echo "$build_block" | grep -qE 'netrc-file[[:space:]]*=[[:space:]]*/tmp/netrc'; then
+  pass "build job writes 'netrc-file = /tmp/netrc' to nix.conf"
+else
+  fail "build job does not write 'netrc-file = /tmp/netrc' to nix.conf"
 fi
 
 if echo "$build_block" | grep -qE 'name: Authenticate git / Nix to github\.com'; then
@@ -281,7 +301,7 @@ required_inline_steps=(
   "name: Install git-lfs (Linux)"
   "name: Install git-lfs (macOS)"
   "name: Ensure LFS files are checked out"
-  "name: Clean up stale magic-nix-cache daemon"
+  "name: Configure Nix netrc-file"
   "name: Clean up stale git extraHeader config"
 )
 for required in "${required_inline_steps[@]}"; do
