@@ -7,6 +7,12 @@ on:
         required: false
         default: false
         type: boolean
+      enable-github-app-auth:
+        description: |
+          Whether to mint a short-lived GitHub App installation token for Git and Nix access to private repositories in this organization. If set to `true`, you must supply `github-app-id` and `github-app-private-key` secrets.
+        required: false
+        default: false
+        type: boolean
       visibility:
         description: "[DEPRECATED] No longer used. Will be removed in a future version."
         required: false
@@ -74,6 +80,10 @@ on:
     secrets:
       ssh-private-key:
         required: false
+      github-app-id:
+        required: false
+      github-app-private-key:
+        required: false
 
 jobs:
   inventory:
@@ -128,6 +138,8 @@ jobs:
       # and causes "Duplicate header: Authorization" errors with actions/checkout
       - name: Clean up stale git extraHeader config
         run: git config --global --unset-all http.https://github.com/.extraHeader || true
+      - name: Clean up stale GitHub SSH URL rewrites
+        run: git config --global --unset-all url."https://github.com/".insteadOf || true
       - name: Install git-lfs (Linux)
         if: ${{ inputs.enable-lfs && runner.os == 'Linux' }}
         run: |
@@ -157,7 +169,17 @@ jobs:
         with:
           lfs: ${{ inputs.enable-lfs }}
           fetch-depth: 0 # Full clone for LFS compatibility
-      - name: Authenticate git / Nix to github.com
+      - name: Mint GitHub App organization installation token
+        id: github-app-token
+        if: ${{ inputs.enable-github-app-auth }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.github-app-id }}
+          private-key: ${{ secrets.github-app-private-key }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+      - name: Authenticate git / Nix to github.com (repository token)
+        if: ${{ !inputs.enable-github-app-auth }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -172,6 +194,29 @@ jobs:
           git config --global credential.helper store
           echo "https://x-access-token:${GITHUB_TOKEN}@github.com" > "${HOME}/.git-credentials"
           chmod 600 "${HOME}/.git-credentials"
+      - name: Authenticate git / Nix to github.com (GitHub App token)
+        if: ${{ inputs.enable-github-app-auth }}
+        env:
+          GITHUB_TOKEN: ${{ steps.github-app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          # ~/.netrc for the git CLI subprocess (and other tools that honour netrc)
+          printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > "${HOME}/.netrc"
+          chmod 600 "${HOME}/.netrc"
+          # /tmp/netrc for Nix (wired into determinate-nix-action via netrc-file)
+          printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > /tmp/netrc
+          chmod 600 /tmp/netrc
+          # git credential helper for any code path that ignores netrc
+          git config --global credential.helper store
+          echo "https://x-access-token:${GITHUB_TOKEN}@github.com" > "${HOME}/.git-credentials"
+          chmod 600 "${HOME}/.git-credentials"
+      - name: Rewrite GitHub SSH URLs to HTTPS
+        if: ${{ inputs.enable-github-app-auth }}
+        run: |
+          set -euo pipefail
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global --add url."https://github.com/".insteadOf "git+ssh://git@github.com/"
       - name: Ensure LFS files are checked out
         if: ${{ inputs.enable-lfs }}
         run: |

@@ -344,6 +344,98 @@ else
   fail "Authenticate step does not set credential.helper store"
 fi
 
+# --- Optional GitHub App authentication contract ---
+
+# Extract a named build step, including its name line, through the next step.
+extract_named_build_step() {
+  local step_name="$1"
+  local in_step=false
+  while IFS= read -r line; do
+    if [[ "$line" == *"name: ${step_name}" ]]; then
+      in_step=true
+      echo "$line"
+      continue
+    fi
+    if $in_step; then
+      if [[ "$line" =~ ^[[:space:]]{6}-[[:space:]]+(name:|uses:) ]]; then
+        break
+      fi
+      echo "$line"
+    fi
+  done < "$WORKFLOW"
+}
+
+if grep -A8 '^      enable-github-app-auth:' "$WORKFLOW" | grep -q 'default: false'; then
+  pass "enable-github-app-auth input is opt-in by default"
+else
+  fail "enable-github-app-auth input is missing or not opt-in by default"
+fi
+
+if grep -q '^      github-app-id:' "$WORKFLOW" && \
+   grep -q '^      github-app-private-key:' "$WORKFLOW"; then
+  pass "GitHub App ID and private-key secrets are declared"
+else
+  fail "GitHub App ID and private-key secrets are not both declared"
+fi
+
+app_token_block="$(extract_named_build_step 'Mint GitHub App organization installation token')"
+
+if echo "$app_token_block" | grep -qF 'if: ${{ inputs.enable-github-app-auth }}'; then
+  pass "GitHub App token minting is enabled only in App-auth mode"
+else
+  fail "GitHub App token minting is not gated by enable-github-app-auth"
+fi
+
+if echo "$app_token_block" | grep -qF 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0'; then
+  pass "GitHub App token action is pinned to v3.2.0 commit"
+else
+  fail "GitHub App token action is not pinned to the required v3.2.0 commit"
+fi
+
+if echo "$app_token_block" | grep -qF 'app-id: ${{ secrets.github-app-id }}' && \
+   echo "$app_token_block" | grep -qF 'private-key: ${{ secrets.github-app-private-key }}' && \
+   echo "$app_token_block" | grep -qF 'owner: ${{ github.repository_owner }}'; then
+  pass "GitHub App token uses caller credentials for the repository owner installation"
+else
+  fail "GitHub App token does not use caller credentials and repository owner installation"
+fi
+
+if echo "$app_token_block" | grep -qF 'permission-contents: read'; then
+  pass "GitHub App token is downscoped to contents: read"
+else
+  fail "GitHub App token is not downscoped to contents: read"
+fi
+
+repository_auth_block="$(extract_named_build_step 'Authenticate git / Nix to github.com (repository token)')"
+app_auth_block="$(extract_named_build_step 'Authenticate git / Nix to github.com (GitHub App token)')"
+
+if echo "$repository_auth_block" | grep -qF 'if: ${{ !inputs.enable-github-app-auth }}' && \
+   echo "$repository_auth_block" | grep -qF 'GITHUB_TOKEN: ${{ github.token }}'; then
+  pass "repository token authentication remains the default path"
+else
+  fail "repository token authentication is not limited to the default path"
+fi
+
+if echo "$app_auth_block" | grep -qF 'if: ${{ inputs.enable-github-app-auth }}' && \
+   echo "$app_auth_block" | grep -qF 'GITHUB_TOKEN: ${{ steps.github-app-token.outputs.token }}' && \
+   ! echo "$app_auth_block" | grep -qF 'github.token'; then
+  pass "App-auth mode uses only the minted token for Git and Nix authentication"
+else
+  fail "App-auth mode can fall back to github.token or does not use the minted token"
+fi
+
+ssh_rewrite_block="$(extract_named_build_step 'Rewrite GitHub SSH URLs to HTTPS')"
+
+if echo "$ssh_rewrite_block" | grep -qF 'if: ${{ inputs.enable-github-app-auth }}' && \
+   echo "$ssh_rewrite_block" | grep -qF 'url."https://github.com/".insteadOf "git@github.com:"' && \
+   echo "$ssh_rewrite_block" | grep -qF 'url."https://github.com/".insteadOf "ssh://git@github.com/"' && \
+   echo "$ssh_rewrite_block" | grep -qF 'url."https://github.com/".insteadOf "git+ssh://git@github.com/"' && \
+   grep -A2 'name: Clean up stale GitHub SSH URL rewrites' "$WORKFLOW" | grep -qF 'url."https://github.com/".insteadOf'; then
+  pass "GitHub SSH URL rewriting to HTTPS is limited to App-auth mode"
+else
+  fail "GitHub SSH URL rewriting is missing, incomplete, or not conditional on App-auth mode"
+fi
+
 # --- Regression guard: no git config --global http.extraHeader (setting) ---
 
 extra_header_hits="$(grep -E 'git config --global[^|]*http\..*\.extraHeader' "$WORKFLOW" | grep -vE -- '--unset' || true)"
