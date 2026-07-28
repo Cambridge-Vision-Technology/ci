@@ -135,7 +135,11 @@ jobs:
 
 ## Notes
 
-This workflow uses Determinate Nix (`DeterminateSystems/determinate-nix-action`) with FlakeHub Cache for binary caching, along with `actions/checkout` and `webfactory/ssh-agent`.
+The workflow preserves an existing machine Nix installation. Its machine-level
+Attic substituters, trusted keys, daemon settings, and Nix version remain
+authoritative. When a runner has no `nix` command, the workflow installs
+upstream Nix with `cachix/install-nix-action`. It also uses `actions/checkout`
+and optionally `webfactory/ssh-agent`.
 
 [nix]: https://zero-to-nix.com
 [nix-system]: https://zero-to-nix.com/concepts/system-specificity

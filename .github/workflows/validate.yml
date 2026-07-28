@@ -21,6 +21,20 @@ jobs:
       # The composite is validated at runtime by the `setup-composite-smoke`
       # job + the structural assertions in tests/setup-action-structure/.
       - run: nix run nixpkgs#actionlint -- ./.github/workflows/workflow.yml ./.github/workflows/validate.yml
+      - name: Run shell contract tests
+        run: |
+          set -euo pipefail
+          failed=0
+          if ! nix shell nixpkgs#yq-go --command tests/runner-map-transform/test.sh; then
+            failed=1
+          fi
+          if ! nix shell nixpkgs#yq-go --command tests/setup-action-structure/test.sh; then
+            failed=1
+          fi
+          if ! nix shell nixpkgs#yq-go --command tests/workflow-structure/test.sh; then
+            failed=1
+          fi
+          exit "$failed"
       # NOTE: was `nixpkgs#nodePackages.prettier` until 2026-05; nixpkgs
       # unstable removed the `nodePackages` set so prettier moved to the
       # top level. Fixed as part of this PR because it blocks the lints

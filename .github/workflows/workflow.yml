@@ -187,7 +187,7 @@ jobs:
           # ~/.netrc for the git CLI subprocess (and other tools that honour netrc)
           printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > "${HOME}/.netrc"
           chmod 600 "${HOME}/.netrc"
-          # /tmp/netrc for Nix (wired into determinate-nix-action via netrc-file)
+          # /tmp/netrc for Nix, configured after Nix is available
           printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > /tmp/netrc
           chmod 600 /tmp/netrc
           # git credential helper for any code path that ignores netrc
@@ -203,7 +203,7 @@ jobs:
           # ~/.netrc for the git CLI subprocess (and other tools that honour netrc)
           printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > "${HOME}/.netrc"
           chmod 600 "${HOME}/.netrc"
-          # /tmp/netrc for Nix (wired into determinate-nix-action via netrc-file)
+          # /tmp/netrc for Nix, configured after Nix is available
           printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > /tmp/netrc
           chmod 600 /tmp/netrc
           # git credential helper for any code path that ignores netrc
@@ -242,12 +242,45 @@ jobs:
           else
             echo "ℹ️ No LFS files in repository"
           fi
-      - name: Clean up stale magic-nix-cache daemon
-        run: pkill -f magic-nix-cache || true
-      - uses: DeterminateSystems/determinate-nix-action@v3
+      - name: Detect existing Nix
+        id: nix-detection
+        run: |
+          set -euo pipefail
+          if command -v nix > /dev/null; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install Nix when absent
+        if: ${{ steps.nix-detection.outputs.present != 'true' }}
+        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
         with:
-          extra-conf: |
-            netrc-file = /tmp/netrc
+          github_access_token: ${{ inputs.enable-github-app-auth && steps.github-app-token.outputs.token || github.token }}
+      - name: Configure Nix netrc
+        run: |
+          set -euo pipefail
+          nix_conf="${XDG_CONFIG_HOME:-$HOME/.config}/nix/nix.conf"
+          mkdir -p "$(dirname "$nix_conf")"
+          touch "$nix_conf"
+          temporary_nix_conf="$(mktemp "${nix_conf}.XXXXXX")"
+          while IFS= read -r nix_conf_line || [ -n "$nix_conf_line" ]; do
+            nix_conf_key="${nix_conf_line%%=*}"
+            if [ "$nix_conf_key" = "$nix_conf_line" ]; then
+              printf '%s\n' "$nix_conf_line"
+              continue
+            fi
+            nix_conf_key="${nix_conf_key#"${nix_conf_key%%[![:space:]]*}"}"
+            nix_conf_key="${nix_conf_key%"${nix_conf_key##*[![:space:]]}"}"
+            if [ "$nix_conf_key" != "netrc-file" ]; then
+              printf '%s\n' "$nix_conf_line"
+            fi
+          done < "$nix_conf" > "$temporary_nix_conf"
+          printf 'netrc-file = /tmp/netrc\n' >> "$temporary_nix_conf"
+          mv "$temporary_nix_conf" "$nix_conf"
+      - name: Verify Nix is available
+        run: |
+          set -euo pipefail
+          nix --version
       - uses: webfactory/ssh-agent@v0.9.0
         if: ${{ inputs.enable-ssh-agent }}
         with:

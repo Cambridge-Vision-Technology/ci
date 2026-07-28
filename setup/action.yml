@@ -3,9 +3,11 @@ description: |
   Reusable setup composite for Nix-based CI: cleans stale git config,
   optionally installs git-lfs, checks out the repo, authenticates the
   git CLI + Nix to github.com via netrc (avoiding rate limits on
-  transitive `builtins.fetchGit`), installs Determinate Nix, and
-  optionally starts ssh-agent + adds GitHub SSH host keys so SSH-form
-  `git clone git@github.com:…` calls succeed inside the job.
+  transitive `builtins.fetchGit`), preserves an existing machine Nix
+  installation and its machine-level Attic settings as authoritative, or
+  installs upstream Nix when it is absent. It optionally starts ssh-agent + adds GitHub SSH
+  host keys so SSH-form `git clone git@github.com:…` calls succeed inside
+  the job.
 
   Composite extracted from this repo's own `.github/workflows/workflow.yml`
   so that bespoke per-repo workflows (e.g. a `tofu plan` job that needs
@@ -53,6 +55,12 @@ inputs:
       `path:` or `repository:` inputs) and just wants the auth + Nix setup.
     required: false
     default: "true"
+  github-token:
+    description: |
+      Repository or GitHub App installation token used for Git, Nix, and an
+      upstream Nix installation when the runner does not already provide Nix.
+    required: false
+    default: ${{ github.token }}
 
 runs:
   using: composite
@@ -104,13 +112,13 @@ runs:
     - name: Authenticate git / Nix to github.com
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ github.token }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
         # ~/.netrc for the git CLI subprocess (and other tools that honour netrc)
         printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > "${HOME}/.netrc"
         chmod 600 "${HOME}/.netrc"
-        # /tmp/netrc for Nix (wired into determinate-nix-action via netrc-file)
+        # /tmp/netrc for Nix, configured after Nix is available
         printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > /tmp/netrc
         chmod 600 /tmp/netrc
         # git credential helper for any code path that ignores netrc
@@ -145,15 +153,51 @@ runs:
           echo "ℹ️ No LFS files in repository"
         fi
 
-    - name: Clean up stale magic-nix-cache daemon
+    - name: Detect existing Nix
+      id: nix-detection
       shell: bash
-      run: pkill -f magic-nix-cache || true
+      run: |
+        set -euo pipefail
+        if command -v nix > /dev/null; then
+          echo "present=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "present=false" >> "$GITHUB_OUTPUT"
+        fi
 
-    - name: Install Determinate Nix
-      uses: DeterminateSystems/determinate-nix-action@v3
+    - name: Install Nix when absent
+      if: ${{ steps.nix-detection.outputs.present != 'true' }}
+      uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
       with:
-        extra-conf: |
-          netrc-file = /tmp/netrc
+        github_access_token: ${{ inputs.github-token }}
+
+    - name: Configure Nix netrc
+      shell: bash
+      run: |
+        set -euo pipefail
+        nix_conf="${XDG_CONFIG_HOME:-$HOME/.config}/nix/nix.conf"
+        mkdir -p "$(dirname "$nix_conf")"
+        touch "$nix_conf"
+        temporary_nix_conf="$(mktemp "${nix_conf}.XXXXXX")"
+        while IFS= read -r nix_conf_line || [ -n "$nix_conf_line" ]; do
+          nix_conf_key="${nix_conf_line%%=*}"
+          if [ "$nix_conf_key" = "$nix_conf_line" ]; then
+            printf '%s\n' "$nix_conf_line"
+            continue
+          fi
+          nix_conf_key="${nix_conf_key#"${nix_conf_key%%[![:space:]]*}"}"
+          nix_conf_key="${nix_conf_key%"${nix_conf_key##*[![:space:]]}"}"
+          if [ "$nix_conf_key" != "netrc-file" ]; then
+            printf '%s\n' "$nix_conf_line"
+          fi
+        done < "$nix_conf" > "$temporary_nix_conf"
+        printf 'netrc-file = /tmp/netrc\n' >> "$temporary_nix_conf"
+        mv "$temporary_nix_conf" "$nix_conf"
+
+    - name: Verify Nix is available
+      shell: bash
+      run: |
+        set -euo pipefail
+        nix --version
 
     - name: Start ssh-agent
       if: ${{ inputs.enable-ssh-agent == 'true' }}

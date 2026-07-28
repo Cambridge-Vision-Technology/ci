@@ -48,7 +48,7 @@ fi
 
 # --- All expected inputs are declared ---
 
-expected_inputs=(enable-ssh-agent ssh-private-key enable-lfs fetch-depth checkout)
+expected_inputs=(enable-ssh-agent ssh-private-key enable-lfs fetch-depth checkout github-token)
 for input_name in "${expected_inputs[@]}"; do
   if grep -qE "^[[:space:]]+${input_name}:" "$ACTION"; then
     pass "input declared: $input_name"
@@ -89,6 +89,12 @@ else
   fail "checkout does not default to true"
 fi
 
+if grep -A8 '^[[:space:]]*github-token:' "$ACTION" | grep -qF 'default: ${{ github.token }}'; then
+  pass "github-token defaults to the repository token"
+else
+  fail "github-token does not default to the repository token"
+fi
+
 # --- Required step names are present ---
 # These are the steps consumers rely on. If any go missing the contract is
 # broken even if the action.yml still parses cleanly.
@@ -96,7 +102,9 @@ fi
 required_steps=(
   "Clean up stale git extraHeader config"
   "Authenticate git / Nix to github.com"
-  "Clean up stale magic-nix-cache daemon"
+  "Detect existing Nix"
+  "Install Nix when absent"
+  "Configure Nix netrc"
   "Add GitHub SSH host keys"
 )
 for step_name in "${required_steps[@]}"; do
@@ -126,10 +134,10 @@ while IFS= read -r line; do
   fi
 done < "$ACTION"
 
-if echo "$authenticate_block" | grep -qE 'GITHUB_TOKEN:[[:space:]]*\$\{\{[[:space:]]*github\.token[[:space:]]*\}\}'; then
-  pass "Authenticate step sets GITHUB_TOKEN: \${{ github.token }}"
+if echo "$authenticate_block" | grep -qE 'GITHUB_TOKEN:[[:space:]]*\$\{\{[[:space:]]*inputs\.github-token[[:space:]]*\}\}'; then
+  pass "Authenticate step uses the selected github-token input"
 else
-  fail "Authenticate step does not set GITHUB_TOKEN: \${{ github.token }}"
+  fail "Authenticate step does not use the selected github-token input"
 fi
 
 for surface in '\$\{?HOME\}?/\.netrc|~/.netrc' '/tmp/netrc' '~/\.git-credentials|\$\{?HOME\}?/\.git-credentials'; do
@@ -203,12 +211,131 @@ else
   fail "Install git-lfs (macOS) step missing"
 fi
 
-# --- determinate-nix-action step is configured with netrc-file ---
+# --- Conditional upstream Nix installation contract ---
 
-if grep -A5 'DeterminateSystems/determinate-nix-action' "$ACTION" | grep -qE 'netrc-file[[:space:]]*=[[:space:]]*/tmp/netrc'; then
-  pass "Determinate Nix step wires netrc-file = /tmp/netrc"
+extract_named_step() {
+  local step_name="$1"
+  local in_step=false
+  while IFS= read -r line; do
+    if [[ "$line" == *"name: ${step_name}" ]]; then
+      in_step=true
+      echo "$line"
+      continue
+    fi
+    if $in_step; then
+      if [[ "$line" =~ ^[[:space:]]{4}-[[:space:]]+(name:|uses:) ]]; then
+        break
+      fi
+      echo "$line"
+    fi
+  done < "$ACTION"
+}
+
+detect_nix_block="$(extract_named_step 'Detect existing Nix')"
+install_nix_block="$(extract_named_step 'Install Nix when absent')"
+configure_netrc_block="$(extract_named_step 'Configure Nix netrc')"
+
+detect_nix_line="$(awk 'index($0, "name: Detect existing Nix") { print NR; exit }' "$ACTION")"
+install_nix_line="$(awk 'index($0, "name: Install Nix when absent") { print NR; exit }' "$ACTION")"
+
+if echo "$detect_nix_block" | grep -qE '^[[:space:]]*id:[[:space:]]*nix-detection[[:space:]]*$'; then
+  pass "Nix detection step has id: nix-detection"
 else
-  fail "Determinate Nix step does not wire netrc-file = /tmp/netrc"
+  fail "Nix detection step does not have id: nix-detection"
+fi
+
+if [[ -n "$detect_nix_line" && -n "$install_nix_line" && "$detect_nix_line" -lt "$install_nix_line" ]]; then
+  pass "Nix detection runs before conditional installation"
+else
+  fail "Nix detection must run before conditional installation"
+fi
+
+if printf '%s\n' "$detect_nix_block" | awk '
+  BEGIN { state = "before"; valid = 1 }
+  /^[[:space:]]*if[[:space:]]+command[[:space:]]+-v[[:space:]]+nix([[:space:];]|$)/ {
+    if (state != "before") valid = 0
+    state = "present"
+    next
+  }
+  /^[[:space:]]*else[[:space:]]*$/ {
+    if (state != "present" || !present_true) valid = 0
+    state = "absent"
+    next
+  }
+  /^[[:space:]]*fi[[:space:]]*$/ {
+    if (state != "absent" || !present_false) valid = 0
+    state = "after"
+    next
+  }
+  /present=true/ && /\$GITHUB_OUTPUT/ {
+    if (state != "present" || present_true) valid = 0
+    present_true = 1
+  }
+  /present=false/ && /\$GITHUB_OUTPUT/ {
+    if (state != "absent" || present_false) valid = 0
+    present_false = 1
+  }
+  END { exit !(valid && state == "after" && present_true && present_false) }
+'; then
+  pass "Nix detection writes GITHUB_OUTPUT values in command -v success and else branches"
+else
+  fail "Nix detection must write present=true only after command -v nix succeeds and present=false in its else branch"
+fi
+
+if echo "$install_nix_block" | grep -qF "if: \${{ steps.nix-detection.outputs.present != 'true' }}"; then
+  pass "upstream installation runs only when Nix is absent"
+else
+  fail "upstream installation is not conditional on absent Nix"
+fi
+
+if echo "$install_nix_block" | grep -qF 'cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0'; then
+  pass "upstream installer is pinned to cachix/install-nix-action v31.11.0"
+else
+  fail "upstream installer is not pinned to cachix/install-nix-action v31.11.0"
+fi
+
+if echo "$install_nix_block" | grep -qF 'github_access_token: ${{ inputs.github-token }}'; then
+  pass "upstream installer receives the selected github-token input"
+else
+  fail "upstream installer does not receive the selected github-token input"
+fi
+
+if grep -qi 'determinate' "$ACTION"; then
+  fail "composite action still references Determinate"
+else
+  pass "composite action has no Determinate references"
+fi
+
+if grep -qi 'magic-nix-cache' "$ACTION"; then
+  fail "composite action still references magic-nix-cache"
+else
+  pass "composite action has no magic-nix-cache references"
+fi
+
+if echo "$install_nix_block" | grep -q 'netrc-file'; then
+  fail "upstream installer configures netrc-file instead of the separate Nix configuration step"
+else
+  pass "upstream installer leaves netrc configuration separate"
+fi
+
+if echo "$configure_netrc_block" | grep -qF 'netrc-file = /tmp/netrc'; then
+  pass "separate Nix configuration sets netrc-file = /tmp/netrc"
+else
+  fail "separate Nix configuration does not set netrc-file = /tmp/netrc"
+fi
+
+if echo "$configure_netrc_block" | grep -qF 'awk'; then
+  fail "netrc configuration depends on awk"
+else
+  pass "netrc configuration does not depend on awk"
+fi
+
+configure_netrc_line="$(awk 'index($0, "name: Configure Nix netrc") { print NR; exit }' "$ACTION")"
+if [[ -n "$install_nix_line" && -n "$configure_netrc_line" && "$configure_netrc_line" -gt "$install_nix_line" ]] && \
+   ! grep -qE '^[[:space:]]*if:' <<< "$configure_netrc_block"; then
+  pass "netrc configuration runs unconditionally after conditional installation"
+else
+  fail "netrc configuration must run unconditionally after conditional installation"
 fi
 
 # --- Summary ---

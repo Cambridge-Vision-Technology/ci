@@ -181,9 +181,6 @@ else
   pass "no commented-out action references"
 fi
 
-# NOTE: determinate-nix-action + magic-nix-cache cleanup assertions moved to
-# tests/setup-action-structure/test.sh — they live in setup/action.yml now.
-
 # --- Build job has id-token: write ---
 
 if echo "$build_block" | grep -q 'id-token.*write'; then
@@ -226,37 +223,31 @@ else
   fail "Validate devShells step does not have correct if condition"
 fi
 
-# --- Build job uses determinate-nix-action (inline; not via composite) ---
-#
-# workflow.yml duplicates the setup steps inline rather than calling the
-# setup/action.yml composite. See the long comment in workflow.yml — GHA's
-# reusable-workflow + local-action interaction is hostile to single-source-
-# of-truth here. The setup composite at setup/action.yml exists as a
-# parallel artifact for BESPOKE downstream workflows (e.g. infra's
-# state-plan-on-pr.yml) to consume directly, NOT for workflow.yml to
-# dogfood.
-#
-# tests/setup-action-structure/test.sh asserts the composite's shape;
-# this file asserts workflow.yml has the matching inline steps. If the
-# two drift, both test suites still pass — drift detection lives in the
-# named-step parity assertions below.
+# --- Inline and composite setup contracts remain in parity ---
 
-if echo "$build_block" | grep -qi 'determinate-nix-action'; then
-  pass "build job uses determinate-nix-action"
-else
-  fail "build job does not use determinate-nix-action"
-fi
-
-if echo "$build_block" | grep -qE 'pkill.*magic-nix-cache'; then
-  pass "build job has magic-nix-cache cleanup step"
-else
-  fail "build job does not have magic-nix-cache cleanup step"
-fi
+required_setup_steps=(
+  "name: Install git-lfs (Linux)"
+  "name: Install git-lfs (macOS)"
+  "name: Ensure LFS files are checked out"
+  "name: Clean up stale git extraHeader config"
+  "name: Detect existing Nix"
+  "name: Install Nix when absent"
+  "name: Configure Nix netrc"
+)
+for setup_surface in "$WORKFLOW" "$REPO_ROOT/setup/action.yml"; do
+  for required in "${required_setup_steps[@]}"; do
+    if grep -qF "$required" "$setup_surface"; then
+      pass "setup contract present in $(basename "$setup_surface"): $required"
+    else
+      fail "setup contract missing from $(basename "$setup_surface"): $required"
+    fi
+  done
+done
 
 if echo "$build_block" | grep -qE 'name: Authenticate git / Nix to github\.com'; then
-  pass "build job has 'Authenticate git / Nix to github.com' step (inline)"
+  pass "build job has an inline Git and Nix authentication step"
 else
-  fail "build job does not have 'Authenticate git / Nix to github.com' step"
+  fail "build job does not have an inline Git and Nix authentication step"
 fi
 
 if echo "$build_block" | grep -qE 'name: Add GitHub SSH host keys'; then
@@ -270,29 +261,6 @@ if echo "$build_block" | grep -qE 'webfactory/ssh-agent'; then
 else
   fail "build job does not have webfactory/ssh-agent reference"
 fi
-
-# --- Required inline setup steps in workflow.yml (drift detection vs composite) ---
-#
-# These step names MUST appear inline in workflow.yml AND in setup/action.yml
-# (asserted separately by tests/setup-action-structure/test.sh). If one file
-# is edited without the other, one suite goes red.
-
-required_inline_steps=(
-  "name: Install git-lfs (Linux)"
-  "name: Install git-lfs (macOS)"
-  "name: Ensure LFS files are checked out"
-  "name: Clean up stale magic-nix-cache daemon"
-  "name: Clean up stale git extraHeader config"
-)
-for required in "${required_inline_steps[@]}"; do
-  # -F (fixed string) so the `(Linux)` / `(macOS)` parens aren't treated
-  # as regex grouping metacharacters.
-  if grep -qF "${required}" "$WORKFLOW"; then
-    pass "inline step present in workflow.yml: ${required}"
-  else
-    fail "inline step missing from workflow.yml (drift vs setup/action.yml): ${required}"
-  fi
-done
 
 # --- Authenticate-step internals (regression assertions kept inline since
 #     workflow.yml owns the inline version; the composite's copy is asserted
@@ -424,6 +392,113 @@ else
   fail "App-auth mode can fall back to github.token or does not use the minted token"
 fi
 
+install_nix_block="$(extract_named_build_step 'Install Nix when absent')"
+detect_nix_block="$(extract_named_build_step 'Detect existing Nix')"
+configure_netrc_block="$(extract_named_build_step 'Configure Nix netrc')"
+
+detect_nix_line="$(awk 'index($0, "name: Detect existing Nix") { print NR; exit }' "$WORKFLOW")"
+install_nix_line="$(awk 'index($0, "name: Install Nix when absent") { print NR; exit }' "$WORKFLOW")"
+
+if echo "$detect_nix_block" | grep -qE '^[[:space:]]*id:[[:space:]]*nix-detection[[:space:]]*$'; then
+  pass "Nix detection step has id: nix-detection"
+else
+  fail "Nix detection step does not have id: nix-detection"
+fi
+
+if [[ -n "$detect_nix_line" && -n "$install_nix_line" && "$detect_nix_line" -lt "$install_nix_line" ]]; then
+  pass "Nix detection runs before conditional installation"
+else
+  fail "Nix detection must run before conditional installation"
+fi
+
+if printf '%s\n' "$detect_nix_block" | awk '
+  BEGIN { state = "before"; valid = 1 }
+  /^[[:space:]]*if[[:space:]]+command[[:space:]]+-v[[:space:]]+nix([[:space:];]|$)/ {
+    if (state != "before") valid = 0
+    state = "present"
+    next
+  }
+  /^[[:space:]]*else[[:space:]]*$/ {
+    if (state != "present" || !present_true) valid = 0
+    state = "absent"
+    next
+  }
+  /^[[:space:]]*fi[[:space:]]*$/ {
+    if (state != "absent" || !present_false) valid = 0
+    state = "after"
+    next
+  }
+  /present=true/ && /\$GITHUB_OUTPUT/ {
+    if (state != "present" || present_true) valid = 0
+    present_true = 1
+  }
+  /present=false/ && /\$GITHUB_OUTPUT/ {
+    if (state != "absent" || present_false) valid = 0
+    present_false = 1
+  }
+  END { exit !(valid && state == "after" && present_true && present_false) }
+'; then
+  pass "Nix detection writes GITHUB_OUTPUT values in command -v success and else branches"
+else
+  fail "Nix detection must write present=true only after command -v nix succeeds and present=false in its else branch"
+fi
+
+if echo "$install_nix_block" | grep -qF "if: \${{ steps.nix-detection.outputs.present != 'true' }}"; then
+  pass "upstream installation runs only when Nix is absent"
+else
+  fail "upstream installation is not conditional on absent Nix"
+fi
+
+if echo "$install_nix_block" | grep -qF 'cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0'; then
+  pass "upstream installer is pinned to cachix/install-nix-action v31.11.0"
+else
+  fail "upstream installer is not pinned to cachix/install-nix-action v31.11.0"
+fi
+
+if echo "$install_nix_block" | grep -qF 'github_access_token: ${{ inputs.enable-github-app-auth && steps.github-app-token.outputs.token || github.token }}'; then
+  pass "upstream installer selects the repository or GitHub App token"
+else
+  fail "upstream installer does not select the repository or GitHub App token"
+fi
+
+if grep -qi 'determinate' "$WORKFLOW"; then
+  fail "workflow still references Determinate"
+else
+  pass "workflow has no Determinate references"
+fi
+
+if grep -qi 'magic-nix-cache' "$WORKFLOW"; then
+  fail "workflow still references magic-nix-cache"
+else
+  pass "workflow has no magic-nix-cache references"
+fi
+
+if echo "$install_nix_block" | grep -q 'netrc-file'; then
+  fail "upstream installer configures netrc-file instead of the separate Nix configuration step"
+else
+  pass "upstream installer leaves netrc configuration separate"
+fi
+
+if echo "$configure_netrc_block" | grep -qF 'netrc-file = /tmp/netrc'; then
+  pass "separate Nix configuration sets netrc-file = /tmp/netrc"
+else
+  fail "separate Nix configuration does not set netrc-file = /tmp/netrc"
+fi
+
+if echo "$configure_netrc_block" | grep -qF 'awk'; then
+  fail "netrc configuration depends on awk"
+else
+  pass "netrc configuration does not depend on awk"
+fi
+
+configure_netrc_line="$(awk 'index($0, "name: Configure Nix netrc") { print NR; exit }' "$WORKFLOW")"
+if [[ -n "$install_nix_line" && -n "$configure_netrc_line" && "$configure_netrc_line" -gt "$install_nix_line" ]] && \
+   ! grep -qE '^[[:space:]]*if:' <<< "$configure_netrc_block"; then
+  pass "netrc configuration runs unconditionally after conditional installation"
+else
+  fail "netrc configuration must run unconditionally after conditional installation"
+fi
+
 ssh_rewrite_block="$(extract_named_build_step 'Rewrite GitHub SSH URLs to HTTPS')"
 
 if echo "$ssh_rewrite_block" | grep -qF 'if: ${{ inputs.enable-github-app-auth }}' && \
@@ -435,6 +510,28 @@ if echo "$ssh_rewrite_block" | grep -qF 'if: ${{ inputs.enable-github-app-auth }
 else
   fail "GitHub SSH URL rewriting is missing, incomplete, or not conditional on App-auth mode"
 fi
+
+# --- Pull-request CI runs every shell contract test ---
+
+VALIDATE="$REPO_ROOT/.github/workflows/validate.yml"
+contract_test_block="$(grep -A20 -F 'name: Run shell contract tests' "$VALIDATE")"
+
+if grep -qE '^[[:space:]]*pull_request:' "$VALIDATE"; then
+  pass "validation workflow runs on pull requests"
+else
+  fail "validation workflow does not run on pull requests"
+fi
+
+for contract_test in \
+  tests/runner-map-transform/test.sh \
+  tests/setup-action-structure/test.sh \
+  tests/workflow-structure/test.sh; do
+  if echo "$contract_test_block" | grep -qF "$contract_test"; then
+    pass "pull-request CI runs $contract_test"
+  else
+    fail "pull-request CI does not run $contract_test"
+  fi
+done
 
 # --- Regression guard: no git config --global http.extraHeader (setting) ---
 
