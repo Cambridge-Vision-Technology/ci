@@ -311,11 +311,19 @@ else
   fail "setup composite does not select the App token from the capability input"
 fi
 
-if grep -qF "ORG_READ_INSTALL_URL_REWRITES: \${{ inputs.enable-org-read-access == 'true' && 'true' || 'false' }}" "$ACTION"; then
-  pass "setup composite requests rewrites only when organization read access is enabled"
-else
-  fail "setup composite rewrite request is not conditional on the capability input"
-fi
+for composite in "$ACTION" "$AUTH_ACTION"; do
+  if grep -qF "ORG_READ_ACCESS_ENABLED: \${{ inputs.enable-org-read-access == 'true' && 'true' || 'false' }}" "$composite"; then
+    pass "${composite#"$REPO_ROOT"/} tells the shared script when the token is organization-wide"
+  else
+    fail "${composite#"$REPO_ROOT"/} does not pass ORG_READ_ACCESS_ENABLED from the capability input"
+  fi
+
+  if grep -qF 'ORG_READ_INSTALL_URL_REWRITES' "$composite"; then
+    fail "${composite#"$REPO_ROOT"/} still names the token's scope after one of its mechanisms"
+  else
+    pass "${composite#"$REPO_ROOT"/} carries no mechanism-named ORG_READ_INSTALL_URL_REWRITES"
+  fi
+done
 
 if grep -qF "ORG_READ_TOKEN: \${{ inputs.enable-org-read-access == 'true' && steps.org-read-app-token.outputs.token || inputs.github-token }}" "$AUTH_ACTION"; then
   pass "auth composite selects the App token from the capability input"
@@ -455,10 +463,110 @@ fi
 
 # --- Only the credential helper this repository installed is removed ---
 
-if grep -qF "unset_global_git_key credential.helper '^store([[:space:]]|\$)'" "$AUTH_SCRIPT"; then
+if grep -qF "unset_git_key --global credential.helper '^store([[:space:]]|\$)'" "$AUTH_SCRIPT"; then
   pass "auth/authenticate.sh removes only the store credential helper it installed"
 else
   fail "auth/authenticate.sh does not confine the credential.helper removal to its own store helper"
+fi
+
+# --- The checkout credential cannot reach Nix's remote HEAD read ---
+# actions/checkout leaves a repository-scoped credential in the workspace
+# repository's LOCAL config:
+#   http.https://github.com/.extraheader = AUTHORIZATION: basic <base64 token>
+# Nix's two git calls do not see the same configuration. The fetch runs as
+# `git -C <nix cache directory>` and never reads it, but the HEAD read runs
+# `git ls-remote --symref` in the process working directory, which in a job IS
+# the checked-out repository. It therefore answers 404 for every other
+# repository, Nix falls back to 'master', and the fetch fails on any repository
+# whose default branch is 'main'. An explicit Authorization header also stops
+# git consulting the credential helper, so the organization token never gets
+# offered on that call.
+
+if grep -qF "unset_git_key --local 'http.https://github.com/.extraHeader' '^AUTHORIZATION:'" "$AUTH_SCRIPT"; then
+  pass "auth/authenticate.sh clears the actions/checkout authorization header from the workspace repository"
+else
+  fail "auth/authenticate.sh leaves the repository-scoped actions/checkout authorization header in place, so Nix's remote HEAD read cannot see past this repository"
+fi
+
+# Without the value pattern this would delete whatever extra headers the
+# consumer configured locally, which are not ours to destroy.
+if awk '
+  index($0, "unset_git_key --local") && index($0, "^AUTHORIZATION:") { found = 1 }
+  END { exit !found }
+' "$AUTH_SCRIPT"; then
+  pass "the local removal is confined by value pattern to the header actions/checkout writes"
+else
+  fail "the local removal is not confined by a value pattern, so it can delete consumer-owned local configuration"
+fi
+
+# Only when the job holds an organization-wide token. On the default path the
+# repository token is exactly as narrow as the checkout credential, so removing
+# it would change behaviour for no gain.
+if awk '
+  index($0, "if [ \"$ORG_READ_ACCESS_ENABLED\" = true ]; then") { in_branch = 1; next }
+  in_branch && /^fi$/ { in_branch = 0; next }
+  in_branch && index($0, "unset_git_key --local") { found = 1 }
+  END { exit !found }
+' "$AUTH_SCRIPT"; then
+  pass "the checkout credential is cleared only when organization read access is enabled"
+else
+  fail "the checkout credential removal is not guarded by ORG_READ_ACCESS_ENABLED, so it changes the default repository-token path"
+fi
+
+local_scope_uses="$(awk '/^[[:space:]]*#/ { next } index($0, "--local") { count++ } END { print count + 0 }' "$AUTH_SCRIPT")"
+if [ "$local_scope_uses" -eq 1 ]; then
+  pass "auth/authenticate.sh touches the consumer's local git configuration exactly once"
+else
+  fail "auth/authenticate.sh touches the consumer's local git configuration $local_scope_uses times, expected only the checkout authorization header"
+fi
+
+# A job that checked nothing out is a legitimate caller of auth/action.yml, so
+# an absent repository is probed for explicitly and reported, never suppressed.
+if grep -qF 'git rev-parse --absolute-git-dir 2>&1' "$AUTH_SCRIPT"; then
+  pass "auth/authenticate.sh probes for the workspace repository and keeps the failure text"
+else
+  fail "auth/authenticate.sh does not probe for the workspace repository with an explicit rev-parse that keeps its failure text"
+fi
+
+if grep -qF 'no workspace repository, so there is no actions/checkout authorization header to clear' "$AUTH_SCRIPT"; then
+  pass "auth/authenticate.sh says so when there is no workspace repository, rather than skipping silently"
+else
+  fail "auth/authenticate.sh skips the checkout credential removal silently when there is no workspace repository"
+fi
+
+# Both scopes go through the one helper that tolerates status 5 and nothing
+# else, so neither can regress into `|| true`.
+if grep -qF 'git config "$scope" --unset-all "$key" "$@" || status=$?' "$AUTH_SCRIPT"; then
+  pass "global and local removals share one helper that branches on the exit status"
+else
+  fail "global and local removals do not share one status-checking helper"
+fi
+
+# auth/action.yml is the surface where the CONSUMER performs the checkout. It
+# must not perform one itself — the fix has to work on a checkout it never saw.
+if grep -qE 'uses:[[:space:]]*actions/checkout' "$AUTH_ACTION"; then
+  fail "auth/action.yml performs a checkout of its own, so it no longer models the consumer-checkout case"
+else
+  pass "auth/action.yml performs no checkout, so the fix covers a checkout it never performed"
+fi
+
+# Stripping persisted credentials at checkout time would fix Nix's HEAD read on
+# the two surfaces that own a checkout and do nothing for auth/action.yml, which
+# owns none. One mechanism in the shared script covers all three, and leaves
+# actions/checkout's own operation and its post-job cleanup untouched.
+if grep -qF 'persist-credentials' "$ACTION"; then
+  fail "setup/action.yml disables persisted checkout credentials instead of using the shared removal, which cannot cover auth/action.yml"
+else
+  pass "setup/action.yml leaves actions/checkout's own credential handling alone"
+fi
+
+setup_last_checkout_line="$(awk 'index($0, "uses: actions/checkout@") { line = NR } END { print line + 0 }' "$ACTION")"
+setup_authenticate_step_line="$(line_of 'name: Authenticate git and Nix to github.com' "$ACTION")"
+if [ "$setup_last_checkout_line" -gt 0 ] &&
+  [[ -n "$setup_authenticate_step_line" && "$setup_authenticate_step_line" -gt "$setup_last_checkout_line" ]]; then
+  pass "authentication runs after every checkout in setup/action.yml, so no checkout can reinstate the header"
+else
+  fail "a checkout in setup/action.yml runs after authentication and would reinstate the repository-scoped header"
 fi
 
 rewrite_forms=(

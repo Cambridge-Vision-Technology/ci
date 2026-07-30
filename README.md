@@ -122,6 +122,12 @@ jobs:
 > [!IMPORTANT]
 > A job on `[self-hosted, Linux, X64]` must set `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` at **workflow** level — the top-level `env:` block, as above — or `actions/create-github-app-token` will not run on that runner at all.
 
+> [!IMPORTANT]
+> Check out **before** the `auth` action, as above, and never after it.
+> `actions/checkout` leaves a credential in the checked-out repository that can read that one repository and nothing else, and Nix reads a remote HEAD from the working directory, so it would answer 404 for every other repository in the organisation.
+> With `enable-org-read-access` the action clears that credential; a checkout that runs afterwards puts it back.
+> Your own repository stays reachable either way — `git`, `git lfs` and submodule updates authenticate through the credential helper the action installs.
+
 <!-- prettier-ignore-end -->
 
 ## Runner requirements

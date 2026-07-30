@@ -264,12 +264,16 @@ jobs:
           echo "::error::$guard_message"
           exit 1
       # Runs after Nix installation so the installer cannot race the Nix
-      # configuration this step writes.
+      # configuration this step writes, and after every actions/checkout in the
+      # job: with organization read access it clears the repository-scoped
+      # authorization header checkout leaves in the workspace repository, which
+      # Nix's remote HEAD read would otherwise pick up from the working
+      # directory, and a later checkout would put back.
       - name: Authenticate git and Nix to github.com
         env:
           ORG_READ_TOKEN: ${{ (inputs.enable-org-read-access || inputs.enable-github-app-auth) && steps.github-app-token.outputs.token || github.token }}
           ORG_READ_OWNER: ${{ github.repository_owner }}
-          ORG_READ_INSTALL_URL_REWRITES: ${{ inputs.enable-org-read-access || inputs.enable-github-app-auth }}
+          ORG_READ_ACCESS_ENABLED: ${{ inputs.enable-org-read-access || inputs.enable-github-app-auth }}
         run: |
           set -euo pipefail
           "$GITHUB_WORKSPACE/.cvt-ci-auth/auth/authenticate.sh"

@@ -464,10 +464,63 @@ else
   fail "authentication step does not select the App token in an alias-aware way"
 fi
 
-if echo "$authenticate_block" | grep -qF 'ORG_READ_INSTALL_URL_REWRITES: ${{ inputs.enable-org-read-access || inputs.enable-github-app-auth }}'; then
-  pass "url rewrites are requested only when organization read access is enabled"
+if echo "$authenticate_block" | grep -qF 'ORG_READ_ACCESS_ENABLED: ${{ inputs.enable-org-read-access || inputs.enable-github-app-auth }}'; then
+  pass "the shared script is told the token is organization-wide only when either capability input is set"
 else
-  fail "url rewrite request is not alias-aware or not conditional"
+  fail "the organization-access flag passed to the shared script is not alias-aware or not conditional"
+fi
+
+if grep -qF 'ORG_READ_INSTALL_URL_REWRITES' "$WORKFLOW"; then
+  fail "workflow still names the token's scope after one of its mechanisms"
+else
+  pass "workflow carries no mechanism-named ORG_READ_INSTALL_URL_REWRITES"
+fi
+
+# --- No checkout can reinstate the repository-scoped authorization header ---
+# actions/checkout writes http.https://github.com/.extraheader into the LOCAL
+# config of the repository it checks out. Nix's remote HEAD read runs
+# `git ls-remote --symref` in the working directory, so it reads that header and
+# gets a 404 for every other repository; the shared script clears it. A checkout
+# running after that step would put it straight back.
+
+last_checkout_line="$(awk 'index($0, "uses: actions/checkout@") { line = NR } END { print line + 0 }' "$WORKFLOW")"
+authenticate_step_line="$(line_of 'name: Authenticate git and Nix to github.com' "$WORKFLOW")"
+if [ "$last_checkout_line" -gt 0 ] &&
+  [[ -n "$authenticate_step_line" && "$authenticate_step_line" -gt "$last_checkout_line" ]]; then
+  pass "authentication runs after every checkout, so no checkout can reinstate the repository-scoped header"
+else
+  fail "a checkout runs after authentication and would reinstate the repository-scoped header"
+fi
+
+# The consumer's own checkout keeps its credentials: they are what the default
+# repository-token path has always used, and the shared script removes the
+# header itself once — and only once — the job holds a wider token.
+consumer_checkout_block="$(awk '
+  !started && index($0, "uses: actions/checkout@v4") { started = 1; print; next }
+  !started { next }
+  /^[[:space:]]{6}-[[:space:]]/ { exit }
+  { print }
+' "$WORKFLOW")"
+
+if echo "$consumer_checkout_block" | grep -qF 'persist-credentials'; then
+  fail "the consumer checkout disables persisted credentials, which changes the default repository-token path and still would not cover auth/action.yml"
+else
+  pass "the consumer checkout keeps its own credential handling"
+fi
+
+# The delegation checkout is this repository's own, fetched only to reach the
+# shared script, so it has no business leaving a credential behind at all.
+if echo "$delegation_block" | grep -qF 'persist-credentials: false'; then
+  pass "the delegation checkout persists no credentials of its own"
+else
+  fail "the delegation checkout persists credentials into the workspace"
+fi
+
+local_git_config_writes="$(awk 'index($0, "git config") && index($0, "--local") { count++ } END { print count + 0 }' "$WORKFLOW")"
+if [ "$local_git_config_writes" -eq 0 ]; then
+  pass "the workflow carries no local git configuration handling of its own"
+else
+  fail "the workflow has $local_git_config_writes local git config statements, duplicating the shared implementation"
 fi
 
 if echo "$authenticate_block" | grep -qF 'ORG_READ_OWNER: ${{ github.repository_owner }}'; then

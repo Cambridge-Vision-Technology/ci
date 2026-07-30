@@ -225,13 +225,16 @@ runs:
     # revision the caller selected. `uses: ./auth` would resolve against the
     # caller's workspace, and expressions are forbidden in `uses:`. Runs after
     # Nix installation so the installer cannot race the Nix configuration this
-    # step writes.
+    # step writes, and after the checkout above: with organization read access
+    # it clears the repository-scoped authorization header checkout leaves in
+    # the workspace repository, which Nix's remote HEAD read would otherwise
+    # pick up from the working directory, and a later checkout would put back.
     - name: Authenticate git and Nix to github.com
       shell: bash
       env:
         ORG_READ_TOKEN: ${{ inputs.enable-org-read-access == 'true' && steps.org-read-app-token.outputs.token || inputs.github-token }}
         ORG_READ_OWNER: ${{ github.repository_owner }}
-        ORG_READ_INSTALL_URL_REWRITES: ${{ inputs.enable-org-read-access == 'true' && 'true' || 'false' }}
+        ORG_READ_ACCESS_ENABLED: ${{ inputs.enable-org-read-access == 'true' && 'true' || 'false' }}
       run: |
         set -euo pipefail
         "$GITHUB_ACTION_PATH/../auth/authenticate.sh"
