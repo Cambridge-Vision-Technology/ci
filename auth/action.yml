@@ -1,0 +1,135 @@
+name: "GitHub organization read access"
+description: |
+  Gives the job read access to this organization's GitHub repositories from
+  `git`, from Nix flake inputs (`git+https`, `git+ssh` and `github:`), and from
+  Nix's Git-LFS transfers.
+
+  The contract is an environment side effect, not an output: after this action
+  runs, `git` and `nix` can read organization repositories. All credential
+  writing happens in `auth/authenticate.sh`, the single implementation shared
+  with `setup/action.yml` and `.github/workflows/workflow.yml`.
+
+  Use this action directly when the full `setup` composite is not appropriate —
+  for example a self-hosted job that manages its own checkout and Nix
+  installation.
+
+inputs:
+  enable-org-read-access:
+    description: |
+      Whether to mint a short-lived GitHub App installation token so the job can
+      read every repository in this organization. If `'true'`, you must also
+      pass `github-app-id` and `github-app-private-key`. When `'false'` the job
+      authenticates with `github-token`, which reaches its own repository only.
+    required: false
+    default: "false"
+  github-app-id:
+    description: |
+      GitHub App ID used to mint the organization read token. Ignored unless
+      `enable-org-read-access` is `'true'`.
+    required: false
+    default: ""
+  github-app-private-key:
+    description: |
+      GitHub App private key (sensitive — pass it through the secrets context at
+      the call site, never inline). Ignored unless `enable-org-read-access` is
+      `'true'`.
+    required: false
+    default: ""
+  github-token:
+    description: |
+      Token used when organization read access is not enabled. Defaults to the
+      repository token, which can read only the repository running the job.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  org-read-token:
+    description: |
+      Escape hatch for callers that must pass the organization read token to a
+      tool this action cannot configure, such as `gh`. Empty unless
+      `enable-org-read-access` is `'true'`. Prefer the environment side effect.
+    value: ${{ steps.org-read-app-token.outputs.token }}
+
+runs:
+  using: composite
+  steps:
+    # Nix below this floor builds a malformed Git-LFS endpoint — it omits the
+    # `.git` segment — and GitHub answers HTTP 422 before it evaluates any
+    # credential, so the organization token path cannot serve Git LFS at all.
+    # Fixed upstream by NixOS/nix#15891 (issue #15285), released in 2.35.0.
+    # The floor is the literal below and never a consumer input, because an
+    # input would let callers silently lower it back under the defect. It is
+    # enforced identically on every platform: a runner below the floor fails the
+    # job, and there is no warning-only or per-platform exemption path.
+    # Unlike `setup/action.yml`, this action never installs Nix, so a job that
+    # wants git credentials alone is a legitimate caller with no Nix on PATH.
+    # An absent `nix` is therefore not a failure and the check is skipped; a
+    # `nix` that is present and below the floor still fails the job. The guard
+    # runs before the token is minted so an unsupported runner costs no
+    # credential.
+    - name: Verify Nix meets the minimum supported version
+      shell: bash
+      env:
+        RUNNER_LABEL: ${{ runner.name }}
+      run: |
+        set -euo pipefail
+        minimum_nix_version="2.35.0"
+
+        if ! command -v nix > /dev/null; then
+          echo "No Nix on PATH on runner '$RUNNER_LABEL'. This action configures credentials only and never installs Nix, so the minimum Nix version $minimum_nix_version is not checked here."
+          exit 0
+        fi
+
+        version_line="$(nix --version)"
+        version_line="${version_line%%$'\n'*}"
+        found_nix_version="${version_line##* }"
+
+        if ! [[ "$found_nix_version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+          echo "::error::Could not read a Nix version out of '$version_line' on runner '$RUNNER_LABEL'."
+          exit 1
+        fi
+
+        meets_minimum=true
+        IFS=. read -ra found_components <<< "$found_nix_version"
+        IFS=. read -ra minimum_components <<< "$minimum_nix_version"
+        for position in 0 1 2; do
+          found_component="${found_components[position]:-0}"
+          minimum_component="${minimum_components[position]:-0}"
+          if ((10#$found_component > 10#$minimum_component)); then
+            break
+          fi
+          if ((10#$found_component < 10#$minimum_component)); then
+            meets_minimum=false
+            break
+          fi
+        done
+
+        if [ "$meets_minimum" = "true" ]; then
+          echo "Nix $found_nix_version on runner '$RUNNER_LABEL' meets the required minimum $minimum_nix_version."
+          exit 0
+        fi
+
+        guard_message="Nix $found_nix_version on runner '$RUNNER_LABEL' is below the required minimum $minimum_nix_version. Below $minimum_nix_version Nix builds a malformed Git-LFS endpoint and GitHub answers HTTP 422 before it evaluates any credential, so this runner cannot fetch Git-LFS objects over the organization token path. Upgrade this runner to Nix $minimum_nix_version or newer."
+
+        echo "::error::$guard_message"
+        exit 1
+
+    - name: Mint GitHub App organization installation token
+      id: org-read-app-token
+      if: ${{ inputs.enable-org-read-access == 'true' }}
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        app-id: ${{ inputs.github-app-id }}
+        private-key: ${{ inputs.github-app-private-key }}
+        owner: ${{ github.repository_owner }}
+        permission-contents: read
+
+    - name: Authenticate git and Nix to github.com
+      shell: bash
+      env:
+        ORG_READ_TOKEN: ${{ inputs.enable-org-read-access == 'true' && steps.org-read-app-token.outputs.token || inputs.github-token }}
+        ORG_READ_OWNER: ${{ github.repository_owner }}
+        ORG_READ_INSTALL_URL_REWRITES: ${{ inputs.enable-org-read-access == 'true' && 'true' || 'false' }}
+      run: |
+        set -euo pipefail
+        "$GITHUB_ACTION_PATH/authenticate.sh"

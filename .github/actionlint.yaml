@@ -1,0 +1,13 @@
+self-hosted-runner:
+  labels:
+    # dell-foo. The organization's self-hosted Linux runner label, used by the
+    # default runner-map in workflow.yml and by the self-hosted manual probe in
+    # validate.yml.
+    - x86_64-linux
+
+paths:
+  "**/workflow.yml":
+    ignore:
+      # job.workflow_repository and job.workflow_sha shipped in April 2026 and
+      # are not yet part of actionlint's `job` context type.
+      - 'property "workflow_(repository|sha)" is not defined in object type'

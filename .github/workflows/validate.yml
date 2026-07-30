@@ -3,6 +3,24 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      run-org-read-probes:
+        description: |
+          Run the manual, read-only organization-read probes. Off by default so an
+          ordinary manual dispatch costs nothing extra. Needs the CI_FETCH_APP_ID and
+          CI_FETCH_APP_PRIVATE_KEY organization secrets and the self-hosted
+          x86_64-linux runner.
+        type: boolean
+        default: false
+
+# The runner reads FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 while it prepares a
+# JavaScript action, so only a workflow-level env takes effect; a job-level or
+# step-level one is already too late. Without it
+# actions/create-github-app-token does not run on [self-hosted, Linux, X64],
+# which is the runner probe-auth-action-self-hosted-org-read uses. This is the
+# same requirement the README documents for consumers (DEV-757).
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   lints:
@@ -85,7 +103,7 @@ jobs:
           test -f "$tmp/self/README.md"
       - name: Verify Nix is on PATH
         run: nix --version
-      - name: Verify netrc surfaces exist with mode 600
+      - name: Verify every credential file is job-scoped with mode 600
         run: |
           set -euo pipefail
           # `stat -f` means different things on BSD (format) vs GNU (filesystem
@@ -97,8 +115,492 @@ jobs:
           else
             stat_cmd='stat -c %a'
           fi
-          for f in "$HOME/.netrc" /tmp/netrc "$HOME/.git-credentials"; do
-            test -f "$f" || { echo "missing: $f" >&2; exit 1; }
-            perms=$($stat_cmd "$f")
-            [[ "$perms" == "600" ]] || { echo "$f has perms $perms, expected 600" >&2; exit 1; }
+          for name in github-org-read-netrc github-org-read-credentials github-org-read-nix-conf; do
+            file="$(find "$RUNNER_TEMP" -maxdepth 1 -name "$name.*" -print -quit)"
+            test -n "$file" || { echo "no $name file under RUNNER_TEMP" >&2; exit 1; }
+            perms=$($stat_cmd "$file")
+            [[ "$perms" == "600" ]] || { echo "$file has perms $perms, expected 600" >&2; exit 1; }
           done
+          # No token-bearing file is written into HOME, so nothing outlives the
+          # job on a self-hosted runner, and no machine-owner state is replaced.
+          test ! -L "$HOME/.netrc" || { echo "$HOME/.netrc was replaced with a symlink" >&2; exit 1; }
+          test ! -e "$HOME/.git-credentials" || { echo "$HOME/.git-credentials was written" >&2; exit 1; }
+          if [[ -f "$HOME/.config/nix/nix.conf" ]]; then
+            ! grep -qE '^[[:space:]]*(extra-)?access-tokens|^[[:space:]]*netrc-file' "$HOME/.config/nix/nix.conf" ||
+              { echo "$HOME/.config/nix/nix.conf carries job credential settings" >&2; exit 1; }
+          fi
+          # The exported NIX_USER_CONF_FILES has to take effect for a fresh nix
+          # invocation, not just inside the step that wrote it.
+          credential_file="$(find "$RUNNER_TEMP" -maxdepth 1 -name 'github-org-read-netrc.*' -print -quit)"
+          nix config show | grep -qF "netrc-file = $credential_file"
+
+  # === Manual organization-read probes ======================================
+  #
+  # These are read-only, manual-only probes for behaviour that needs real App
+  # credentials and real private repositories. They are NOT part of ordinary
+  # validation.
+  #
+  # Every probe is gated on BOTH `github.event_name == 'workflow_dispatch'` AND
+  # the explicit `run-org-read-probes` opt-in. On a pull_request or a push the
+  # first term is already false, and the `inputs` context does not exist there
+  # either, so no probe job is ever created. On a plain manual dispatch the
+  # opt-in defaults to false, so a dispatch has to ask for them by name. Normal
+  # pull-request validation therefore keeps exercising the unchanged default
+  # path with no App credentials.
+  #
+  # Each probe proves the same three things over HTTPS, with App credentials and
+  # no SSH key whatsoever:
+  #   * a private clone of infra-base,
+  #   * resolution of private nix-shared through its git+ssh:// flake URL, which
+  #     only succeeds when the insteadOf rewrite reaches Nix's flake fetcher,
+  #   * a private Git-LFS-bearing input whose objects arrive smudged rather than
+  #     as pointers.
+  # purescript-dedup is the LFS repository used throughout: it is LFS-bearing
+  # (71 tracked *.zstd fixtures, ~9 MB of objects) and small enough to finish
+  # inside the probe budget, unlike oz (295 MB) or blackbriar (312 MB).
+  #
+  # Nothing here writes to any repository, and no step prints or uploads a
+  # private key, an installation token, or a credential file.
+
+  # Probe 1 — the reusable workflow, on a GitHub-hosted Linux runner.
+  #
+  # The proof lives in tests/org-read-probe/flake.nix rather than in steps,
+  # because a job that calls a reusable workflow cannot add steps to it. That
+  # flake's three inputs are the three things above, and `nix flake check`
+  # cannot even evaluate without resolving them.
+  #
+  # The limits here are structural, not oversights. GitHub rejects `steps`,
+  # `env` AND `timeout-minutes` on a job that calls a reusable workflow with
+  # `uses:` — verified against actionlint — so this probe cannot clear the Nix
+  # caches, cannot blank SSH_AUTH_SOCK / GIT_SSH_COMMAND to make SSH unusable,
+  # cannot cap its own runtime, and cannot run the public-repository A/B check.
+  #
+  # What stands in for each: it runs on ubuntu-latest, a fresh virtual machine
+  # that has never held a Nix cache and carries no SSH key and no agent, so the
+  # cold cache and the absence of SSH are guaranteed by construction rather than
+  # by a step; it inherits workflow.yml's build timeout; and workflow.yml's own
+  # hard-coded 2.35.0 minimum-Nix guard fails the job outright below the floor,
+  # which is the condition the A/B check would otherwise detect.
+  #
+  # The two probes that CAN run steps do clear both the gitv3 and the fetcher
+  # cache and do make SSH unusable — including the self-hosted one, which is the
+  # only runner with a persistent cache to go stale.
+  probe-reusable-workflow-org-read:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run-org-read-probes }}
+    uses: ./.github/workflows/workflow.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      enable-org-read-access: true
+      directory: ./tests/org-read-probe
+      runner-map: '{"x86_64-linux": "ubuntu-latest"}'
+      check-dev-shells: false
+    secrets:
+      github-app-id: ${{ secrets.CI_FETCH_APP_ID }}
+      github-app-private-key: ${{ secrets.CI_FETCH_APP_PRIVATE_KEY }}
+
+  # Probe 2 — the setup composite consumed standalone, on GitHub-hosted Linux.
+  probe-setup-action-org-read:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run-org-read-probes }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      # Only so the final step can read this job's own log back and prove no
+      # credential was printed into it.
+      actions: read
+    env:
+      # No SSH path can be reached from this job: no agent socket is inherited,
+      # and the ssh transport is a command that always fails. Anything that
+      # succeeds below therefore succeeded over HTTPS with the App token, which
+      # is the whole point — a passing git+ssh fetch would prove nothing.
+      SSH_AUTH_SOCK: ""
+      GIT_SSH_COMMAND: "false"
+      PROBE_ORG: Cambridge-Vision-Technology
+    steps:
+      # First, before anything can fetch. A warm Nix git cache serves a private
+      # tree that an earlier authenticated run put there and turns this whole
+      # probe into a false green. That has happened in practice. The fetcher
+      # cache is cleared too: it memoises fetchGit results by URL and revision,
+      # so on its own it would short-circuit the fetches below just as happily.
+      - name: Clear the Nix git and fetcher caches
+        run: |
+          set -euo pipefail
+          rm -rf "$HOME/.cache/nix/gitv3"
+          rm -rf "$HOME"/.cache/nix/fetcher-cache-v*
+
+      - uses: actions/checkout@v4
+
+      - uses: ./setup
+        with:
+          checkout: "false" # already checked out above
+          enable-org-read-access: "true"
+          github-app-id: ${{ secrets.CI_FETCH_APP_ID }}
+          github-app-private-key: ${{ secrets.CI_FETCH_APP_PRIVATE_KEY }}
+
+      # Runs after the setup composite because that is what installs Nix on a
+      # GitHub-hosted runner. NIX_USER_CONF_FILES is dropped for this one
+      # command so neither the netrc nor the access token can influence it.
+      - name: Isolate the Nix Git-LFS endpoint bug with a credential-free public repository
+        run: |
+          set -euo pipefail
+          # Apress/repo-with-large-file-storage is public, so no credential is
+          # involved, and its URL deliberately carries no `.git` suffix, which is
+          # exactly what triggers the malformed-endpoint defect.
+          #
+          # READ THE OUTCOMES CAREFULLY, because they are counter-intuitive:
+          #   HTTP 403 "exceeded its LFS budget" is the SUCCESS signal. Only a
+          #     real GitHub LFS API response can produce it, so endpoint
+          #     discovery worked. This is what Nix >= 2.35.0 does.
+          #   HTTP 422 is the FAILURE signal. Nix < 2.35.0 builds a malformed
+          #     endpoint and GitHub rejects it before it evaluates any
+          #     credential, so every private LFS result below would be
+          #     meaningless.
+          # Both are matched on the surrounding error phrase Nix prints, never
+          # on a bare three-digit number. This log carries store paths and URLs,
+          # and a store hash containing "403" with no "422" anywhere would
+          # otherwise be read as a FALSE GREEN. A phrase that fails to match
+          # falls through to the fail-closed branch at the end, which is a red.
+          ab_log="$RUNNER_TEMP/public-lfs-ab.log"
+          ab_status=0
+          env -u NIX_USER_CONF_FILES nix eval --impure --raw \
+            --extra-experimental-features "nix-command flakes" \
+            --expr '(builtins.fetchGit { url = "https://github.com/Apress/repo-with-large-file-storage"; ref = "master"; lfs = true; }).outPath' \
+            > "$ab_log" 2>&1 || ab_status=$?
+          sed -E 's/(gh[psu]_|github_pat_)[A-Za-z0-9_]+/[redacted]/g' "$ab_log"
+          if [ "$ab_status" -eq 0 ]; then
+            echo "The public Git-LFS fetch succeeded outright, so endpoint discovery works on this Nix."
+            exit 0
+          fi
+          if grep -qE 'HTTP error 422' "$ab_log"; then
+            echo "::error::HTTP 422 from the public Git-LFS endpoint: this Nix builds a malformed endpoint and is below 2.35.0. Treat every private Git-LFS result in this run as meaningless."
+            exit 1
+          fi
+          if grep -qE 'HTTP error 403|exceeded its LFS budget' "$ab_log"; then
+            echo "HTTP 403 (LFS budget exceeded) is the expected SUCCESS signal: a real GitHub LFS API response proves endpoint discovery worked."
+            exit 0
+          fi
+          echo "::error::The public Git-LFS A/B check produced neither a 'HTTP error 403' / 'exceeded its LFS budget' success phrase nor a 'HTTP error 422' failure phrase, so it cannot isolate the endpoint defect from authentication."
+          exit 1
+
+      - name: Verify no SSH credential is available to this probe
+        run: |
+          set -euo pipefail
+          test -z "${SSH_AUTH_SOCK:-}"
+          test "$GIT_SSH_COMMAND" = "false"
+          test ! -e "$HOME/.ssh/id_rsa"
+          test ! -e "$HOME/.ssh/id_ed25519"
+          echo "No agent socket and no usable ssh transport: every fetch below has to go over HTTPS with the App token."
+
+      - name: Clone private infra-base over HTTPS with App credentials only
+        run: |
+          set -euo pipefail
+          clone_dir="$RUNNER_TEMP/probe-infra-base"
+          rm -rf "$clone_dir"
+          git clone --depth 1 "https://github.com/$PROBE_ORG/infra-base" "$clone_dir"
+          test -f "$clone_dir/flake.nix"
+          rm -rf "$clone_dir"
+          echo "Private infra-base cloned over HTTPS."
+
+      - name: Resolve private nix-shared through its git+ssh flake URL
+        run: |
+          set -euo pipefail
+          # Nix strips the git+ prefix and hands git a plain
+          # ssh://git@github.com/… URL, which is the one load-bearing insteadOf
+          # form. With no SSH key in the job, resolving this at all proves the
+          # rewrite reaches Nix's flake fetcher.
+          metadata="$RUNNER_TEMP/probe-nix-shared-metadata.json"
+          nix flake metadata --json \
+            --extra-experimental-features "nix-command flakes" \
+            "git+ssh://git@github.com/$PROBE_ORG/nix-shared" > "$metadata"
+          grep -q '"revision"' "$metadata"
+          rm -f "$metadata"
+          echo "Private nix-shared resolved through its git+ssh:// flake URL."
+
+      - name: Fetch a private Git-LFS-bearing input over the token path
+        run: |
+          set -euo pipefail
+          # Nix implements the Git-LFS protocol itself, so the credential helper
+          # and http.extraHeader do not reach it. It reads the remote through
+          # libgit2, which applies insteadOf, so this fetch takes the HTTPS
+          # branch and authenticates from netrc-file.
+          store_path="$(nix eval --impure --raw \
+            --extra-experimental-features "nix-command flakes" \
+            --expr '(builtins.fetchGit { url = "ssh://git@github.com/'"$PROBE_ORG"'/purescript-dedup"; ref = "main"; lfs = true; }).outPath')"
+          listing="$RUNNER_TEMP/probe-lfs-files.txt"
+          find "$store_path" -type f -name '*.zstd' | sort > "$listing"
+          test -s "$listing"
+          lfs_file="$(head -n 1 "$listing")"
+          header="$RUNNER_TEMP/probe-lfs-header"
+          head -c 100 "$lfs_file" > "$header"
+          if grep -q 'git-lfs.github.com/spec/v1' "$header"; then
+            echo "::error::$lfs_file is an unsmudged Git-LFS pointer, so the LFS objects were never fetched."
+            rm -f "$listing" "$header"
+            exit 1
+          fi
+          rm -f "$listing" "$header"
+          echo "Private Git-LFS objects fetched and smudged over the token path."
+
+      - name: Verify this job's log contains no credential material
+        env:
+          PROBE_API_TOKEN: ${{ github.token }}
+          PROBE_JOB_NAME: ${{ github.job }}
+        run: |
+          set -euo pipefail
+          # Reads this job's own streamed log back and greps it. Matches are
+          # never echoed, only counted, so the check cannot become the leak.
+          jobs_json="$RUNNER_TEMP/probe-run-jobs.json"
+          curl --fail --silent --show-error \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $PROBE_API_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" > "$jobs_json"
+          # shellcheck disable=SC2016 # $name is a jq variable, not a shell one.
+          job_id="$(nix --extra-experimental-features "nix-command flakes" shell nixpkgs#jq --command \
+            jq -r --arg name "$PROBE_JOB_NAME" '.jobs[] | select(.name == $name) | .id' "$jobs_json")"
+          rm -f "$jobs_json"
+          test -n "$job_id"
+          # GitHub does not promise a 200 for a job that is still running, so a
+          # single miss is a timing artefact rather than a defect. Retry, then
+          # fail CLOSED with a message that names which of the two possible
+          # failures happened: the log could not be read, or a credential was
+          # found in it. A check that cannot run must never report success.
+          job_log="$RUNNER_TEMP/probe-job-log.txt"
+          log_status="never-attempted"
+          for attempt in 1 2 3 4 5; do
+            if log_status="$(curl --silent --show-error --location \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $PROBE_API_TOKEN" \
+              --output "$job_log" --write-out '%{http_code}' \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/logs")"; then
+              if [ "$log_status" = "200" ]; then
+                break
+              fi
+            else
+              log_status="curl-transport-failure"
+            fi
+            echo "Job log not readable yet on attempt $attempt of 5 (result $log_status); the job is still running, so GitHub may not have flushed it." >&2
+            if [ "$attempt" -ne 5 ]; then
+              sleep 10
+            fi
+          done
+          if [ "$log_status" != "200" ]; then
+            rm -f "$job_log"
+            echo "::error::LOG UNREADABLE, NOT A LEAK: this job's own log could not be read back after 5 attempts (last result $log_status). No credential material was found and none was ruled out — the check could not run, so it fails closed."
+            exit 1
+          fi
+          leaked=0
+          if grep -qE '(gh[psu]_|github_pat_)[A-Za-z0-9_]{20,}' "$job_log"; then
+            leaked=1
+          fi
+          if grep -q 'PRIVATE KEY' "$job_log"; then
+            leaked=1
+          fi
+          rm -f "$job_log"
+          if [ "$leaked" -ne 0 ]; then
+            echo "::error::CREDENTIAL LEAK: this job's log was read back successfully and contains an installation token or private key material."
+            exit 1
+          fi
+          echo "This job's log contains no installation token and no private key."
+
+  # Probe 3 — the standalone auth action on the self-hosted x86_64-linux runner
+  # (dell-foo, Nix 2.35.1), deliberately WITHOUT the setup composite. This is
+  # the DEV-757 build_workstation_index shape: a job that manages its own
+  # checkout and already has Nix, and wants credentials only.
+  #
+  # actions/create-github-app-token is a JavaScript action and will not run on
+  # [self-hosted, Linux, X64] unless FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 is set
+  # at workflow level, which it is at the top of this file.
+  probe-auth-action-self-hosted-org-read:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run-org-read-probes }}
+    runs-on: x86_64-linux
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+    env:
+      SSH_AUTH_SOCK: ""
+      GIT_SSH_COMMAND: "false"
+      PROBE_ORG: Cambridge-Vision-Technology
+    steps:
+      # This is the runner the cold cache actually matters on: it is persistent,
+      # so an earlier authenticated run leaves both the git cache and the
+      # fetcher cache warm, and every fetch below would be served from disk.
+      - name: Clear the Nix git and fetcher caches
+        run: |
+          set -euo pipefail
+          rm -rf "$HOME/.cache/nix/gitv3"
+          rm -rf "$HOME"/.cache/nix/fetcher-cache-v*
+
+      - uses: actions/checkout@v4
+
+      # Unlike the setup-composite probe, this runner already has Nix, so the
+      # credential-free A/B check runs BEFORE any credential exists at all.
+      - name: Isolate the Nix Git-LFS endpoint bug with a credential-free public repository
+        run: |
+          set -euo pipefail
+          # Apress/repo-with-large-file-storage is public, so no credential is
+          # involved, and its URL deliberately carries no `.git` suffix, which is
+          # exactly what triggers the malformed-endpoint defect.
+          #
+          # READ THE OUTCOMES CAREFULLY, because they are counter-intuitive:
+          #   HTTP 403 "exceeded its LFS budget" is the SUCCESS signal. Only a
+          #     real GitHub LFS API response can produce it, so endpoint
+          #     discovery worked. This is what Nix >= 2.35.0 does.
+          #   HTTP 422 is the FAILURE signal. Nix < 2.35.0 builds a malformed
+          #     endpoint and GitHub rejects it before it evaluates any
+          #     credential, so every private LFS result below would be
+          #     meaningless.
+          # Both are matched on the surrounding error phrase Nix prints, never
+          # on a bare three-digit number. This log carries store paths and URLs,
+          # and a store hash containing "403" with no "422" anywhere would
+          # otherwise be read as a FALSE GREEN. A phrase that fails to match
+          # falls through to the fail-closed branch at the end, which is a red.
+          ab_log="$RUNNER_TEMP/public-lfs-ab.log"
+          ab_status=0
+          env -u NIX_USER_CONF_FILES nix eval --impure --raw \
+            --extra-experimental-features "nix-command flakes" \
+            --expr '(builtins.fetchGit { url = "https://github.com/Apress/repo-with-large-file-storage"; ref = "master"; lfs = true; }).outPath' \
+            > "$ab_log" 2>&1 || ab_status=$?
+          sed -E 's/(gh[psu]_|github_pat_)[A-Za-z0-9_]+/[redacted]/g' "$ab_log"
+          if [ "$ab_status" -eq 0 ]; then
+            echo "The public Git-LFS fetch succeeded outright, so endpoint discovery works on this Nix."
+            exit 0
+          fi
+          if grep -qE 'HTTP error 422' "$ab_log"; then
+            echo "::error::HTTP 422 from the public Git-LFS endpoint: this Nix builds a malformed endpoint and is below 2.35.0. Treat every private Git-LFS result in this run as meaningless."
+            exit 1
+          fi
+          if grep -qE 'HTTP error 403|exceeded its LFS budget' "$ab_log"; then
+            echo "HTTP 403 (LFS budget exceeded) is the expected SUCCESS signal: a real GitHub LFS API response proves endpoint discovery worked."
+            exit 0
+          fi
+          echo "::error::The public Git-LFS A/B check produced neither a 'HTTP error 403' / 'exceeded its LFS budget' success phrase nor a 'HTTP error 422' failure phrase, so it cannot isolate the endpoint defect from authentication."
+          exit 1
+
+      - uses: ./auth
+        with:
+          enable-org-read-access: "true"
+          github-app-id: ${{ secrets.CI_FETCH_APP_ID }}
+          github-app-private-key: ${{ secrets.CI_FETCH_APP_PRIVATE_KEY }}
+
+      - name: Verify no SSH credential is available to this probe
+        run: |
+          set -euo pipefail
+          test -z "${SSH_AUTH_SOCK:-}"
+          test "$GIT_SSH_COMMAND" = "false"
+          test ! -e "$HOME/.ssh/id_rsa"
+          test ! -e "$HOME/.ssh/id_ed25519"
+          echo "No agent socket and no usable ssh transport: every fetch below has to go over HTTPS with the App token."
+
+      - name: Clone private infra-base over HTTPS with App credentials only
+        run: |
+          set -euo pipefail
+          clone_dir="$RUNNER_TEMP/probe-infra-base"
+          rm -rf "$clone_dir"
+          git clone --depth 1 "https://github.com/$PROBE_ORG/infra-base" "$clone_dir"
+          test -f "$clone_dir/flake.nix"
+          rm -rf "$clone_dir"
+          echo "Private infra-base cloned over HTTPS."
+
+      - name: Resolve private nix-shared through its git+ssh flake URL
+        run: |
+          set -euo pipefail
+          # Nix strips the git+ prefix and hands git a plain
+          # ssh://git@github.com/… URL, which is the one load-bearing insteadOf
+          # form. With no SSH key in the job, resolving this at all proves the
+          # rewrite reaches Nix's flake fetcher.
+          metadata="$RUNNER_TEMP/probe-nix-shared-metadata.json"
+          nix flake metadata --json \
+            --extra-experimental-features "nix-command flakes" \
+            "git+ssh://git@github.com/$PROBE_ORG/nix-shared" > "$metadata"
+          grep -q '"revision"' "$metadata"
+          rm -f "$metadata"
+          echo "Private nix-shared resolved through its git+ssh:// flake URL."
+
+      - name: Fetch a private Git-LFS-bearing input over the token path
+        run: |
+          set -euo pipefail
+          # Nix implements the Git-LFS protocol itself, so the credential helper
+          # and http.extraHeader do not reach it. It reads the remote through
+          # libgit2, which applies insteadOf, so this fetch takes the HTTPS
+          # branch and authenticates from netrc-file.
+          store_path="$(nix eval --impure --raw \
+            --extra-experimental-features "nix-command flakes" \
+            --expr '(builtins.fetchGit { url = "ssh://git@github.com/'"$PROBE_ORG"'/purescript-dedup"; ref = "main"; lfs = true; }).outPath')"
+          listing="$RUNNER_TEMP/probe-lfs-files.txt"
+          find "$store_path" -type f -name '*.zstd' | sort > "$listing"
+          test -s "$listing"
+          lfs_file="$(head -n 1 "$listing")"
+          header="$RUNNER_TEMP/probe-lfs-header"
+          head -c 100 "$lfs_file" > "$header"
+          if grep -q 'git-lfs.github.com/spec/v1' "$header"; then
+            echo "::error::$lfs_file is an unsmudged Git-LFS pointer, so the LFS objects were never fetched."
+            rm -f "$listing" "$header"
+            exit 1
+          fi
+          rm -f "$listing" "$header"
+          echo "Private Git-LFS objects fetched and smudged over the token path."
+
+      - name: Verify this job's log contains no credential material
+        env:
+          PROBE_API_TOKEN: ${{ github.token }}
+          PROBE_JOB_NAME: ${{ github.job }}
+        run: |
+          set -euo pipefail
+          # Reads this job's own streamed log back and greps it. Matches are
+          # never echoed, only counted, so the check cannot become the leak.
+          jobs_json="$RUNNER_TEMP/probe-run-jobs.json"
+          curl --fail --silent --show-error \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $PROBE_API_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" > "$jobs_json"
+          # shellcheck disable=SC2016 # $name is a jq variable, not a shell one.
+          job_id="$(nix --extra-experimental-features "nix-command flakes" shell nixpkgs#jq --command \
+            jq -r --arg name "$PROBE_JOB_NAME" '.jobs[] | select(.name == $name) | .id' "$jobs_json")"
+          rm -f "$jobs_json"
+          test -n "$job_id"
+          # GitHub does not promise a 200 for a job that is still running, so a
+          # single miss is a timing artefact rather than a defect. Retry, then
+          # fail CLOSED with a message that names which of the two possible
+          # failures happened: the log could not be read, or a credential was
+          # found in it. A check that cannot run must never report success.
+          job_log="$RUNNER_TEMP/probe-job-log.txt"
+          log_status="never-attempted"
+          for attempt in 1 2 3 4 5; do
+            if log_status="$(curl --silent --show-error --location \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $PROBE_API_TOKEN" \
+              --output "$job_log" --write-out '%{http_code}' \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/logs")"; then
+              if [ "$log_status" = "200" ]; then
+                break
+              fi
+            else
+              log_status="curl-transport-failure"
+            fi
+            echo "Job log not readable yet on attempt $attempt of 5 (result $log_status); the job is still running, so GitHub may not have flushed it." >&2
+            if [ "$attempt" -ne 5 ]; then
+              sleep 10
+            fi
+          done
+          if [ "$log_status" != "200" ]; then
+            rm -f "$job_log"
+            echo "::error::LOG UNREADABLE, NOT A LEAK: this job's own log could not be read back after 5 attempts (last result $log_status). No credential material was found and none was ruled out — the check could not run, so it fails closed."
+            exit 1
+          fi
+          leaked=0
+          if grep -qE '(gh[psu]_|github_pat_)[A-Za-z0-9_]{20,}' "$job_log"; then
+            leaked=1
+          fi
+          if grep -q 'PRIVATE KEY' "$job_log"; then
+            leaked=1
+          fi
+          rm -f "$job_log"
+          if [ "$leaked" -ne 0 ]; then
+            echo "::error::CREDENTIAL LEAK: this job's log was read back successfully and contains an installation token or private key material."
+            exit 1
+          fi
+          echo "This job's log contains no installation token and no private key."
