@@ -4,13 +4,17 @@ set -euo pipefail
 # Environment contract. A shell script cannot receive GitHub Actions inputs, so
 # every parameter arrives as an environment variable:
 #
-#   ORG_READ_TOKEN                 GitHub token presented to github.com.
-#   ORG_READ_OWNER                 Organization that scopes Nix extra-access-tokens.
-#   ORG_READ_INSTALL_URL_REWRITES  "true" installs the github.com insteadOf rewrites.
-#   RUNNER_TEMP                    Job-scoped directory that holds every token-bearing file.
-#   GITHUB_ENV                     Job-scoped environment file that points Nix at the
-#                                  job-scoped configuration.
-#   HOME                           Location of the global git configuration.
+#   ORG_READ_TOKEN            GitHub token presented to github.com.
+#   ORG_READ_OWNER            Organization that scopes Nix extra-access-tokens.
+#   ORG_READ_ACCESS_ENABLED   "true" when ORG_READ_TOKEN can read the whole
+#                             organization rather than one repository. It installs
+#                             the github.com insteadOf rewrites and clears the
+#                             repository-scoped credential actions/checkout leaves
+#                             in the workspace repository.
+#   RUNNER_TEMP               Job-scoped directory that holds every token-bearing file.
+#   GITHUB_ENV                Job-scoped environment file that points Nix at the
+#                             job-scoped configuration.
+#   HOME                      Location of the global git configuration.
 #
 # Every file this script writes that carries the token lives under RUNNER_TEMP
 # at mode 600. Nothing token-bearing is written into HOME, so no plaintext
@@ -32,18 +36,35 @@ trimmed() {
 }
 
 # An optional value pattern confines the removal to the entries this repository
-# installs. Without one, --unset-all deletes whatever the machine owner
-# configured, which on a self-hosted runner is not ours to destroy.
-unset_global_git_key() {
-  local key="$1"
+# installs, or in the --local scope to the one entry actions/checkout installs.
+# Without one, --unset-all deletes whatever the machine owner or the consumer
+# configured, which is not ours to destroy.
+unset_git_key() {
+  local scope="$1"
+  local key="$2"
   local status=0
-  shift
-  git config --global --unset-all "$key" "$@" || status=$?
+  shift 2
+  git config "$scope" --unset-all "$key" "$@" || status=$?
   # Status 5 means the key was absent, which is the normal first-run case.
   if [ "$status" -ne 0 ] && [ "$status" -ne 5 ]; then
-    echo "authenticate.sh: git config --global --unset-all ${key} failed with status ${status}" >&2
+    echo "authenticate.sh: git config ${scope} --unset-all ${key} failed with status ${status}" >&2
     exit "$status"
   fi
+}
+
+# git resolves --local against the repository containing the working directory,
+# which is where actions/checkout put the credential and where Nix reads a
+# remote HEAD from. A job that checked nothing out is a legitimate caller —
+# auth/action.yml exists for jobs that manage their own workspace — so an absent
+# repository is reported and skipped rather than treated as a failure.
+current_git_repository() {
+  local status=0 output
+  output="$(git rev-parse --absolute-git-dir 2>&1)" || status=$?
+  if [ "$status" -eq 0 ]; then
+    printf '%s' "$output"
+    return
+  fi
+  echo "authenticate.sh: the working directory $(pwd) is not inside a git repository: ${output}" >&2
 }
 
 system_managed_netrc_file() {
@@ -80,15 +101,15 @@ default_nix_user_conf_files() {
 
 require_environment ORG_READ_TOKEN
 require_environment ORG_READ_OWNER
-require_environment ORG_READ_INSTALL_URL_REWRITES
+require_environment ORG_READ_ACCESS_ENABLED
 require_environment RUNNER_TEMP
 require_environment GITHUB_ENV
 require_environment HOME
 
-case "$ORG_READ_INSTALL_URL_REWRITES" in
+case "$ORG_READ_ACCESS_ENABLED" in
   true | false) ;;
   *)
-    echo "authenticate.sh: ORG_READ_INSTALL_URL_REWRITES must be 'true' or 'false', got '${ORG_READ_INSTALL_URL_REWRITES}'" >&2
+    echo "authenticate.sh: ORG_READ_ACCESS_ENABLED must be 'true' or 'false', got '${ORG_READ_ACCESS_ENABLED}'" >&2
     exit 1
     ;;
 esac
@@ -138,13 +159,48 @@ printf 'https://x-access-token:%s@github.com\n' "$ORG_READ_TOKEN" > "$git_creden
 # of this repository installed against the default $HOME/.git-credentials path,
 # and the job-scoped `store --file=…` this script installs. Any other helper the
 # machine owner configured — osxkeychain, gh, manager, libsecret — is left alone.
-unset_global_git_key credential.helper '^store([[:space:]]|$)'
+unset_git_key --global credential.helper '^store([[:space:]]|$)'
 git config --global --add credential.helper "store --file=${git_credential_file}"
 
-unset_global_git_key 'http.https://github.com/.extraHeader'
+unset_git_key --global 'http.https://github.com/.extraHeader'
 
-unset_global_git_key 'url.https://github.com/.insteadOf'
-if [ "$ORG_READ_INSTALL_URL_REWRITES" = true ]; then
+# actions/checkout leaves a repository-scoped credential in the LOCAL config of
+# the repository it checked out:
+#
+#   http.https://github.com/.extraheader = AUTHORIZATION: basic <base64 token>
+#
+# That token reads that one repository and nothing else. Nix makes two git calls
+# per flake input and they do not see the same configuration. The fetch runs as
+# `git -C <nix cache directory>`, outside the workspace, so it uses the
+# credential helper installed above. The HEAD read runs `git ls-remote --symref`
+# in the process working directory, which in a job IS the checked-out
+# repository, so it picks that header up; and an explicit Authorization header
+# stops git falling through to the credential helper, so the organization token
+# is never offered on that call. Every cross-repository HEAD read then answers
+# 404, Nix warns "could not read HEAD ref … using 'master'", and the fetch fails
+# on any repository whose default branch is `main`.
+#
+# Removed only when this job holds an organization-wide token, so the default
+# repository-token path keeps the checkout credential it has always had. The
+# value pattern confines the removal to the header actions/checkout writes, and
+# its own post-job cleanup checks the key exists before unsetting it, so this is
+# invisible to it. Git and git-lfs operations against the consumer's own
+# repository keep working, through the credential helper installed above, which
+# carries the broader organization token. Submodule configurations are left
+# untouched: Nix never reads them, and the consumer's submodule operations are
+# not ours to disturb.
+if [ "$ORG_READ_ACCESS_ENABLED" = true ]; then
+  workspace_git_repository="$(current_git_repository)"
+  if [ -n "$workspace_git_repository" ]; then
+    unset_git_key --local 'http.https://github.com/.extraHeader' '^AUTHORIZATION:'
+    echo "authenticate.sh: cleared the actions/checkout authorization header from ${workspace_git_repository}" >&2
+  else
+    echo "authenticate.sh: no workspace repository, so there is no actions/checkout authorization header to clear" >&2
+  fi
+fi
+
+unset_git_key --global 'url.https://github.com/.insteadOf'
+if [ "$ORG_READ_ACCESS_ENABLED" = true ]; then
   git config --global --add url."https://github.com/".insteadOf "git@github.com:"
   # The load-bearing form: Nix strips the git+ prefix and hands git a plain
   # ssh://git@github.com/… URL. The other two forms are defensive completeness.
@@ -171,4 +227,4 @@ printf 'NIX_USER_CONF_FILES=%s\n' "$NIX_USER_CONF_FILES" >> "$GITHUB_ENV"
 echo "authenticate.sh: netrc credential file ${credential_file} (mode 600)" >&2
 echo "authenticate.sh: git credential file ${git_credential_file} (mode 600)" >&2
 echo "authenticate.sh: nix configuration ${nix_conf} (mode 600)" >&2
-echo "authenticate.sh: github.com url rewrites installed: ${ORG_READ_INSTALL_URL_REWRITES}" >&2
+echo "authenticate.sh: organization read access enabled: ${ORG_READ_ACCESS_ENABLED}" >&2

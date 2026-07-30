@@ -13,6 +13,15 @@ description: |
   for example a self-hosted job that manages its own checkout and Nix
   installation.
 
+  Run it AFTER your own `actions/checkout`. With `enable-org-read-access` set,
+  it clears the repository-scoped authorization header `actions/checkout` leaves
+  in the workspace repository, because Nix reads a remote HEAD from the working
+  directory and that header answers 404 for every other repository. Your own
+  repository stays reachable — `git`, `git lfs` and submodule updates all
+  authenticate through the credential helper this action installs, which carries
+  the wider organization token. A checkout that runs after this action puts the
+  header back, so check out first.
+
 inputs:
   enable-org-read-access:
     description: |
@@ -129,7 +138,7 @@ runs:
       env:
         ORG_READ_TOKEN: ${{ inputs.enable-org-read-access == 'true' && steps.org-read-app-token.outputs.token || inputs.github-token }}
         ORG_READ_OWNER: ${{ github.repository_owner }}
-        ORG_READ_INSTALL_URL_REWRITES: ${{ inputs.enable-org-read-access == 'true' && 'true' || 'false' }}
+        ORG_READ_ACCESS_ENABLED: ${{ inputs.enable-org-read-access == 'true' && 'true' || 'false' }}
       run: |
         set -euo pipefail
         "$GITHUB_ACTION_PATH/authenticate.sh"
