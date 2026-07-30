@@ -3,13 +3,19 @@ on:
     inputs:
       enable-ssh-agent:
         description: |
-          Whether to enable [`webfactory/ssh-agent`](https://github.com/webfactory/ssh-agent) in the workflow. If you set this to `true` you need to supply a secret named `ssh-private-key`.
+          [DEPRECATED] Whether to enable [`webfactory/ssh-agent`](https://github.com/webfactory/ssh-agent) in the workflow. If you set this to `true` you need to supply a secret named `ssh-private-key`. Prefer `enable-org-read-access`, which serves the same repositories over HTTPS and also serves Git LFS.
+        required: false
+        default: false
+        type: boolean
+      enable-org-read-access:
+        description: |
+          Whether to mint a short-lived GitHub App installation token so the job can read every repository in this organization, including private flake inputs and their Git-LFS objects. If set to `true`, you must supply `github-app-id` and `github-app-private-key` secrets.
         required: false
         default: false
         type: boolean
       enable-github-app-auth:
         description: |
-          Whether to mint a short-lived GitHub App installation token for Git and Nix access to private repositories in this organization. If set to `true`, you must supply `github-app-id` and `github-app-private-key` secrets.
+          [DEPRECATED] Alias for `enable-org-read-access`. Use that input instead.
         required: false
         default: false
         type: boolean
@@ -119,27 +125,32 @@ jobs:
       # NOTE on the setup composite at setup/action.yml: that action
       # exists for BESPOKE workflows in other repos to consume directly
       # (e.g. a `tofu plan` job that needs auth + ssh-agent but isn't
-      # shaped like a flake-check). It is NOT dogfooded by workflow.yml
-      # because GHA's interaction between reusable-workflows and local-
-      # action references has constraints that don't survive cross-repo
-      # consumption — `uses: ./setup` resolves via the workspace
-      # (CALLER's repo, not cvt-ci); `uses: cvt-ci/setup@${{ github.workflow_sha }}`
-      # has an empty workflow_sha when the outer trigger isn't itself a
-      # reusable-workflow call; @main pinning would mean PR validation
-      # tests the OLD composite, not the new one in the PR.
+      # shaped like a flake-check). It is NOT consumed by workflow.yml
+      # because `uses: ./setup` resolves via the workspace (CALLER's repo,
+      # not this one) and expressions are forbidden in `uses:`. Credential
+      # acquisition is not duplicated: both surfaces run the single
+      # auth/authenticate.sh implementation from this repository, at the
+      # revision the caller selected.
       #
-      # So workflow.yml duplicates the setup steps inline. The duplication
-      # is tested for parity by tests/workflow-structure/test.sh +
-      # tests/setup-action-structure/test.sh — if the two drift,
-      # contract assertions fail loud. Single-source-of-truth is the
-      # ideal; cross-repo GHA semantics make it infeasible here.
-      # Clean up stale git config from previous runs on self-hosted runners
-      # A previous workflow version set http.extraHeader globally, which persists
-      # and causes "Duplicate header: Authorization" errors with actions/checkout
-      - name: Clean up stale git extraHeader config
-        run: git config --global --unset-all http.https://github.com/.extraHeader || true
-      - name: Clean up stale GitHub SSH URL rewrites
-        run: git config --global --unset-all url."https://github.com/".insteadOf || true
+      # Stale credential cleanup stays inline here rather than in
+      # auth/authenticate.sh: it has to run before actions/checkout, and
+      # reaching the shared script requires a checkout to exist. This is
+      # deliberate, not drift. A previous workflow version set
+      # http.extraHeader and the github.com insteadOf rewrites globally;
+      # both persist on self-hosted runners and cause "Duplicate header:
+      # Authorization" errors with actions/checkout.
+      - name: Clean up stale git credential config
+        run: |
+          set -euo pipefail
+          for stale_key in http.https://github.com/.extraHeader url.https://github.com/.insteadOf; do
+            unset_status=0
+            git config --global --unset-all "$stale_key" || unset_status=$?
+            # Status 5 means the key was absent, which is the normal case.
+            if [ "$unset_status" -ne 0 ] && [ "$unset_status" -ne 5 ]; then
+              echo "git config --global --unset-all $stale_key failed with status $unset_status" >&2
+              exit "$unset_status"
+            fi
+          done
       - name: Install git-lfs (Linux)
         if: ${{ inputs.enable-lfs && runner.os == 'Linux' }}
         run: |
@@ -171,52 +182,101 @@ jobs:
           fetch-depth: 0 # Full clone for LFS compatibility
       - name: Mint GitHub App organization installation token
         id: github-app-token
-        if: ${{ inputs.enable-github-app-auth }}
+        if: ${{ inputs.enable-org-read-access || inputs.enable-github-app-auth }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.github-app-id }}
           private-key: ${{ secrets.github-app-private-key }}
           owner: ${{ github.repository_owner }}
           permission-contents: read
-      - name: Authenticate git / Nix to github.com (repository token)
-        if: ${{ !inputs.enable-github-app-auth }}
+      # job.workflow_repository / job.workflow_sha identify this repository at
+      # the revision the caller selected, with no hard-coded repository and with
+      # the fork path preserved. It runs after the consumer's own checkout
+      # because a path-less actions/checkout clears the workspace.
+      - name: Check out shared authentication implementation
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .cvt-ci-auth
+          persist-credentials: false
+          token: ${{ (inputs.enable-org-read-access || inputs.enable-github-app-auth) && steps.github-app-token.outputs.token || github.token }}
+      - name: Detect existing Nix
+        id: nix-detection
+        run: |
+          set -euo pipefail
+          if command -v nix > /dev/null; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install Nix when absent
+        if: ${{ steps.nix-detection.outputs.present != 'true' }}
+        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+        with:
+          github_access_token: ${{ (inputs.enable-org-read-access || inputs.enable-github-app-auth) && steps.github-app-token.outputs.token || github.token }}
+      # Nix below this floor builds a malformed Git-LFS endpoint — it omits the
+      # `.git` segment — and GitHub answers HTTP 422 before it evaluates any
+      # credential, so the organization token path cannot serve Git LFS at all.
+      # Fixed upstream by NixOS/nix#15891 (issue #15285), released in 2.35.0.
+      # The floor is the literal below and never a consumer input, because an
+      # input would let callers silently lower it back under the defect. It is
+      # enforced identically on every platform: a runner below the floor fails
+      # the job, and there is no warning-only or per-platform exemption path.
+      - name: Verify Nix meets the minimum supported version
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          RUNNER_LABEL: ${{ matrix.systems.runner }}
         run: |
           set -euo pipefail
-          # ~/.netrc for the git CLI subprocess (and other tools that honour netrc)
-          printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > "${HOME}/.netrc"
-          chmod 600 "${HOME}/.netrc"
-          # /tmp/netrc for Nix, configured after Nix is available
-          printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > /tmp/netrc
-          chmod 600 /tmp/netrc
-          # git credential helper for any code path that ignores netrc
-          git config --global credential.helper store
-          echo "https://x-access-token:${GITHUB_TOKEN}@github.com" > "${HOME}/.git-credentials"
-          chmod 600 "${HOME}/.git-credentials"
-      - name: Authenticate git / Nix to github.com (GitHub App token)
-        if: ${{ inputs.enable-github-app-auth }}
+          minimum_nix_version="2.35.0"
+
+          version_line="$(nix --version)"
+          version_line="${version_line%%$'\n'*}"
+          found_nix_version="${version_line##* }"
+
+          if ! [[ "$found_nix_version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+            echo "::error::Could not read a Nix version out of '$version_line' on runner '$RUNNER_LABEL'."
+            exit 1
+          fi
+
+          meets_minimum=true
+          IFS=. read -ra found_components <<< "$found_nix_version"
+          IFS=. read -ra minimum_components <<< "$minimum_nix_version"
+          for position in 0 1 2; do
+            found_component="${found_components[position]:-0}"
+            minimum_component="${minimum_components[position]:-0}"
+            if ((10#$found_component > 10#$minimum_component)); then
+              break
+            fi
+            if ((10#$found_component < 10#$minimum_component)); then
+              meets_minimum=false
+              break
+            fi
+          done
+
+          if [ "$meets_minimum" = "true" ]; then
+            echo "Nix $found_nix_version on runner '$RUNNER_LABEL' meets the required minimum $minimum_nix_version."
+            exit 0
+          fi
+
+          guard_message="Nix $found_nix_version on runner '$RUNNER_LABEL' is below the required minimum $minimum_nix_version. Below $minimum_nix_version Nix builds a malformed Git-LFS endpoint and GitHub answers HTTP 422 before it evaluates any credential, so this runner cannot fetch Git-LFS objects over the organization token path. Upgrade this runner to Nix $minimum_nix_version or newer."
+
+          echo "::error::$guard_message"
+          exit 1
+      # Runs after Nix installation so the installer cannot race the Nix
+      # configuration this step writes.
+      - name: Authenticate git and Nix to github.com
         env:
-          GITHUB_TOKEN: ${{ steps.github-app-token.outputs.token }}
+          ORG_READ_TOKEN: ${{ (inputs.enable-org-read-access || inputs.enable-github-app-auth) && steps.github-app-token.outputs.token || github.token }}
+          ORG_READ_OWNER: ${{ github.repository_owner }}
+          ORG_READ_INSTALL_URL_REWRITES: ${{ inputs.enable-org-read-access || inputs.enable-github-app-auth }}
         run: |
           set -euo pipefail
-          # ~/.netrc for the git CLI subprocess (and other tools that honour netrc)
-          printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > "${HOME}/.netrc"
-          chmod 600 "${HOME}/.netrc"
-          # /tmp/netrc for Nix, configured after Nix is available
-          printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > /tmp/netrc
-          chmod 600 /tmp/netrc
-          # git credential helper for any code path that ignores netrc
-          git config --global credential.helper store
-          echo "https://x-access-token:${GITHUB_TOKEN}@github.com" > "${HOME}/.git-credentials"
-          chmod 600 "${HOME}/.git-credentials"
-      - name: Rewrite GitHub SSH URLs to HTTPS
-        if: ${{ inputs.enable-github-app-auth }}
+          "$GITHUB_WORKSPACE/.cvt-ci-auth/auth/authenticate.sh"
+      - name: Remove shared authentication checkout
         run: |
           set -euo pipefail
-          git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
-          git config --global --add url."https://github.com/".insteadOf "git+ssh://git@github.com/"
+          rm -rf "$GITHUB_WORKSPACE/.cvt-ci-auth"
       - name: Ensure LFS files are checked out
         if: ${{ inputs.enable-lfs }}
         run: |
@@ -242,45 +302,6 @@ jobs:
           else
             echo "ℹ️ No LFS files in repository"
           fi
-      - name: Detect existing Nix
-        id: nix-detection
-        run: |
-          set -euo pipefail
-          if command -v nix > /dev/null; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Install Nix when absent
-        if: ${{ steps.nix-detection.outputs.present != 'true' }}
-        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
-        with:
-          github_access_token: ${{ inputs.enable-github-app-auth && steps.github-app-token.outputs.token || github.token }}
-      - name: Configure Nix netrc
-        run: |
-          set -euo pipefail
-          nix_conf="${XDG_CONFIG_HOME:-$HOME/.config}/nix/nix.conf"
-          mkdir -p "$(dirname "$nix_conf")"
-          touch "$nix_conf"
-          temporary_nix_conf="$(mktemp "${nix_conf}.XXXXXX")"
-          while IFS= read -r nix_conf_line || [ -n "$nix_conf_line" ]; do
-            nix_conf_key="${nix_conf_line%%=*}"
-            if [ "$nix_conf_key" = "$nix_conf_line" ]; then
-              printf '%s\n' "$nix_conf_line"
-              continue
-            fi
-            nix_conf_key="${nix_conf_key#"${nix_conf_key%%[![:space:]]*}"}"
-            nix_conf_key="${nix_conf_key%"${nix_conf_key##*[![:space:]]}"}"
-            if [ "$nix_conf_key" != "netrc-file" ]; then
-              printf '%s\n' "$nix_conf_line"
-            fi
-          done < "$nix_conf" > "$temporary_nix_conf"
-          printf 'netrc-file = /tmp/netrc\n' >> "$temporary_nix_conf"
-          mv "$temporary_nix_conf" "$nix_conf"
-      - name: Verify Nix is available
-        run: |
-          set -euo pipefail
-          nix --version
       - uses: webfactory/ssh-agent@v0.9.0
         if: ${{ inputs.enable-ssh-agent }}
         with:
