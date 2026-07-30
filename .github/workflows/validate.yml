@@ -208,9 +208,6 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      # Only so the final step can read this job's own log back and prove no
-      # credential was printed into it.
-      actions: read
     env:
       # No SSH path can be reached from this job: no agent socket is inherited,
       # and the ssh transport is a command that always fails. Anything that
@@ -343,67 +340,6 @@ jobs:
           rm -f "$listing" "$header"
           echo "Private Git-LFS objects fetched and smudged over the token path."
 
-      - name: Verify this job's log contains no credential material
-        env:
-          PROBE_API_TOKEN: ${{ github.token }}
-          PROBE_JOB_NAME: ${{ github.job }}
-        run: |
-          set -euo pipefail
-          # Reads this job's own streamed log back and greps it. Matches are
-          # never echoed, only counted, so the check cannot become the leak.
-          jobs_json="$RUNNER_TEMP/probe-run-jobs.json"
-          curl --fail --silent --show-error \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer $PROBE_API_TOKEN" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" > "$jobs_json"
-          # shellcheck disable=SC2016 # $name is a jq variable, not a shell one.
-          job_id="$(nix --extra-experimental-features "nix-command flakes" shell nixpkgs#jq --command \
-            jq -r --arg name "$PROBE_JOB_NAME" '.jobs[] | select(.name == $name) | .id' "$jobs_json")"
-          rm -f "$jobs_json"
-          test -n "$job_id"
-          # GitHub does not promise a 200 for a job that is still running, so a
-          # single miss is a timing artefact rather than a defect. Retry, then
-          # fail CLOSED with a message that names which of the two possible
-          # failures happened: the log could not be read, or a credential was
-          # found in it. A check that cannot run must never report success.
-          job_log="$RUNNER_TEMP/probe-job-log.txt"
-          log_status="never-attempted"
-          for attempt in 1 2 3 4 5; do
-            if log_status="$(curl --silent --show-error --location \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer $PROBE_API_TOKEN" \
-              --output "$job_log" --write-out '%{http_code}' \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/logs")"; then
-              if [ "$log_status" = "200" ]; then
-                break
-              fi
-            else
-              log_status="curl-transport-failure"
-            fi
-            echo "Job log not readable yet on attempt $attempt of 5 (result $log_status); the job is still running, so GitHub may not have flushed it." >&2
-            if [ "$attempt" -ne 5 ]; then
-              sleep 10
-            fi
-          done
-          if [ "$log_status" != "200" ]; then
-            rm -f "$job_log"
-            echo "::error::LOG UNREADABLE, NOT A LEAK: this job's own log could not be read back after 5 attempts (last result $log_status). No credential material was found and none was ruled out — the check could not run, so it fails closed."
-            exit 1
-          fi
-          leaked=0
-          if grep -qE '(gh[psu]_|github_pat_)[A-Za-z0-9_]{20,}' "$job_log"; then
-            leaked=1
-          fi
-          if grep -q 'PRIVATE KEY' "$job_log"; then
-            leaked=1
-          fi
-          rm -f "$job_log"
-          if [ "$leaked" -ne 0 ]; then
-            echo "::error::CREDENTIAL LEAK: this job's log was read back successfully and contains an installation token or private key material."
-            exit 1
-          fi
-          echo "This job's log contains no installation token and no private key."
-
   # Probe 3 — the standalone auth action on the self-hosted x86_64-linux runner
   # (dell-foo, Nix 2.35.1), deliberately WITHOUT the setup composite. This is
   # the DEV-757 build_workstation_index shape: a job that manages its own
@@ -419,7 +355,6 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      actions: read
     env:
       SSH_AUTH_SOCK: ""
       GIT_SSH_COMMAND: "false"
@@ -544,63 +479,146 @@ jobs:
           rm -f "$listing" "$header"
           echo "Private Git-LFS objects fetched and smudged over the token path."
 
-      - name: Verify this job's log contains no credential material
-        env:
-          PROBE_API_TOKEN: ${{ github.token }}
-          PROBE_JOB_NAME: ${{ github.job }}
+  # The probe log credential audit — a SEPARATE job, for two reasons that are
+  # both fatal to the in-job version this replaces.
+  #
+  # 1. A job cannot read its own log. GET /actions/jobs/{id}/logs answers 404
+  #    for an in-progress job, so the in-job check retried five times over fifty
+  #    seconds and then failed closed on every single run — permanently red, and
+  #    unable to pass even when all nine substantive steps succeeded. Failing
+  #    closed was right; asking a running job for its own log was not.
+  # 2. The runner echoes each `run:` body into the log under the "Run" group, so
+  #    the scan's own literals — the private-key marker and the token pattern —
+  #    would have appeared in the log it read back. The moment the 404 was fixed
+  #    the check would have flipped from permanently red to permanently red for
+  #    the opposite reason: a guaranteed FALSE-POSITIVE credential leak,
+  #    matching its own source. Keeping the scan out of every log it reads is
+  #    the only thing that removes that class of defect, and only a separate
+  #    job can do it.
+  #
+  # Because it `needs:` the probes, every audited job has already completed and
+  # its log is flushed and retrievable. `always()` keeps the audit running when
+  # a probe FAILED — a leak in a failed probe is exactly as serious — while the
+  # dispatch gate on the same line keeps it off ordinary pull requests, since
+  # `always()` overrides only the implicit needs-succeeded condition, never an
+  # explicit `if:` term.
+  #
+  # It is also strictly wider than the in-job version: it scans the nested jobs
+  # of the reusable-workflow probe, which could never have carried a step at
+  # all, and it holds no credential of its own beyond the read-only GITHUB_TOKEN
+  # it needs to read logs.
+  probe-log-credential-audit:
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run-org-read-probes }}
+    needs:
+      - probe-reusable-workflow-org-read
+      - probe-setup-action-org-read
+      - probe-auth-action-self-hosted-org-read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    env:
+      PROBE_API_TOKEN: ${{ github.token }}
+      # Audits every probe, and deliberately not itself: this job's log is the
+      # one log that legitimately contains the patterns below.
+      AUDITED_PROBE_JOBS: |
+        probe-reusable-workflow-org-read
+        probe-setup-action-org-read
+        probe-auth-action-self-hosted-org-read
+    steps:
+      - name: Audit every probe job log for credential material
         run: |
           set -euo pipefail
-          # Reads this job's own streamed log back and greps it. Matches are
-          # never echoed, only counted, so the check cannot become the leak.
+          # Two failure modes, deliberately worded so a red is never ambiguous:
+          #   AUDIT INCOMPLETE, NOT A LEAK — the scan could not run over some
+          #     log. Nothing was found and nothing was ruled out.
+          #   CREDENTIAL LEAK — a log was read in full and a credential was
+          #     found in it.
+          # Matches are never echoed, only the name of the job they were found
+          # in, so the audit can never become the leak it reports.
           jobs_json="$RUNNER_TEMP/probe-run-jobs.json"
+          jobs_status=0
           curl --fail --silent --show-error \
             --header "Accept: application/vnd.github+json" \
             --header "Authorization: Bearer $PROBE_API_TOKEN" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" > "$jobs_json"
-          # shellcheck disable=SC2016 # $name is a jq variable, not a shell one.
-          job_id="$(nix --extra-experimental-features "nix-command flakes" shell nixpkgs#jq --command \
-            jq -r --arg name "$PROBE_JOB_NAME" '.jobs[] | select(.name == $name) | .id' "$jobs_json")"
-          rm -f "$jobs_json"
-          test -n "$job_id"
-          # GitHub does not promise a 200 for a job that is still running, so a
-          # single miss is a timing artefact rather than a defect. Retry, then
-          # fail CLOSED with a message that names which of the two possible
-          # failures happened: the log could not be read, or a credential was
-          # found in it. A check that cannot run must never report success.
-          job_log="$RUNNER_TEMP/probe-job-log.txt"
-          log_status="never-attempted"
-          for attempt in 1 2 3 4 5; do
-            if log_status="$(curl --silent --show-error --location \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer $PROBE_API_TOKEN" \
-              --output "$job_log" --write-out '%{http_code}' \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/logs")"; then
-              if [ "$log_status" = "200" ]; then
-                break
-              fi
-            else
-              log_status="curl-transport-failure"
-            fi
-            echo "Job log not readable yet on attempt $attempt of 5 (result $log_status); the job is still running, so GitHub may not have flushed it." >&2
-            if [ "$attempt" -ne 5 ]; then
-              sleep 10
-            fi
-          done
-          if [ "$log_status" != "200" ]; then
-            rm -f "$job_log"
-            echo "::error::LOG UNREADABLE, NOT A LEAK: this job's own log could not be read back after 5 attempts (last result $log_status). No credential material was found and none was ruled out — the check could not run, so it fails closed."
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            > "$jobs_json" || jobs_status=$?
+          if [ "$jobs_status" -ne 0 ]; then
+            echo "::error::AUDIT INCOMPLETE, NOT A LEAK: this run's job list could not be read (curl exit $jobs_status), so no probe log was scanned."
+            exit 1
+          fi
+          # One unpaginated page or nothing: a second page would silently leave
+          # some probe log unscanned, which is the failure this whole job exists
+          # to make impossible.
+          total_jobs="$(jq -r '.total_count' "$jobs_json")"
+          listed_jobs="$(jq -r '.jobs | length' "$jobs_json")"
+          if [ "$total_jobs" -ne "$listed_jobs" ]; then
+            echo "::error::AUDIT INCOMPLETE, NOT A LEAK: this run has $total_jobs jobs but only $listed_jobs were returned on one page, so a probe log would go unscanned."
             exit 1
           fi
           leaked=0
-          if grep -qE '(gh[psu]_|github_pat_)[A-Za-z0-9_]{20,}' "$job_log"; then
-            leaked=1
-          fi
-          if grep -q 'PRIVATE KEY' "$job_log"; then
-            leaked=1
-          fi
-          rm -f "$job_log"
+          scanned=0
+          while IFS= read -r audited_job; do
+            if [ -z "$audited_job" ]; then
+              continue
+            fi
+            # A job that calls a reusable workflow contributes no job of its own
+            # name; its nested jobs appear as "<caller> / <called>". Matching the
+            # name and that prefix covers both shapes.
+            matches="$RUNNER_TEMP/probe-audit-matches.tsv"
+            jq -r --arg name "$audited_job" \
+              '.jobs[] | select(.name == $name or (.name | startswith($name + " / "))) | [(.id | tostring), .status, .name] | @tsv' \
+              "$jobs_json" > "$matches"
+            if [ ! -s "$matches" ]; then
+              echo "::error::AUDIT INCOMPLETE, NOT A LEAK: no job in this run is named '$audited_job' or nested under it, so its log was never scanned. A renamed or removed probe fails the audit rather than emptying it."
+              exit 1
+            fi
+            while IFS=$'\t' read -r job_id job_status job_name; do
+              if [ "$job_status" != "completed" ]; then
+                echo "::error::AUDIT INCOMPLETE, NOT A LEAK: job '$job_name' is '$job_status' rather than completed, so GitHub need not have flushed its log and it was not scanned."
+                exit 1
+              fi
+              job_log="$RUNNER_TEMP/probe-job-log.txt"
+              log_status="never-attempted"
+              for attempt in 1 2 3; do
+                if log_status="$(curl --silent --show-error --location \
+                  --header "Accept: application/vnd.github+json" \
+                  --header "Authorization: Bearer $PROBE_API_TOKEN" \
+                  --output "$job_log" --write-out '%{http_code}' \
+                  "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/logs")"; then
+                  if [ "$log_status" = "200" ]; then
+                    break
+                  fi
+                else
+                  log_status="curl-transport-failure"
+                fi
+                echo "Log of completed job '$job_name' not served on attempt $attempt of 3 (result $log_status); GitHub's log store is briefly eventually consistent after a job ends." >&2
+                if [ "$attempt" -ne 3 ]; then
+                  sleep 5
+                fi
+              done
+              if [ "$log_status" != "200" ]; then
+                rm -f "$job_log"
+                echo "::error::AUDIT INCOMPLETE, NOT A LEAK: the log of completed job '$job_name' could not be read after 3 attempts (last result $log_status). No credential material was found in it and none was ruled out."
+                exit 1
+              fi
+              if grep -qE '(gh[psu]_|github_pat_)[A-Za-z0-9_]{20,}' "$job_log"; then
+                echo "::error::CREDENTIAL LEAK: the log of job '$job_name' was read in full and contains an installation token."
+                leaked=1
+              fi
+              if grep -q 'PRIVATE KEY' "$job_log"; then
+                echo "::error::CREDENTIAL LEAK: the log of job '$job_name' was read in full and contains private key material."
+                leaked=1
+              fi
+              rm -f "$job_log"
+              scanned=$((scanned + 1))
+              echo "Scanned the log of job '$job_name'."
+            done < "$matches"
+            rm -f "$matches"
+          done <<< "$AUDITED_PROBE_JOBS"
+          rm -f "$jobs_json"
           if [ "$leaked" -ne 0 ]; then
-            echo "::error::CREDENTIAL LEAK: this job's log was read back successfully and contains an installation token or private key material."
             exit 1
           fi
-          echo "This job's log contains no installation token and no private key."
+          echo "Scanned $scanned probe job logs in full: no installation token and no private key in any of them."

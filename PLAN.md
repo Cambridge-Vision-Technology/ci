@@ -4,12 +4,12 @@ Linear: https://linear.app/aykua/issue/DEV-759/ci-own-ci-credential-acquisition-
 
 ## CURRENT STATUS
 
-pr_implementation_status: IN_PROGRESS — CHUNKS 1.1, 1.2, 1.3 and 1.4 complete; CHUNK 1.5 outstanding
+pr_implementation_status: IN_PROGRESS — CHUNKS 1.1, 1.2, 1.3 and 1.4 complete, including the 2026-07-30 credential-audit redesign; CHUNK 1.5 local gates verified (407 assertions, prettier, actionlint, `nix flake check`), PR-side gates outstanding
 live_acceptance_status: NOT_APPLICABLE
 current_phase: PHASE 1
 current_chunk: CHUNK 1.5
 valid_phases: PHASE 0, PHASE 1
-next_pr_action: Run the release gates — prettier, actionlint, the three shell contract suites run directly, `nix flake check`, the normal pull-request checks, and a manual probe dispatch against the PR branch whose run the pull request then links to
+next_pr_action: Close the two GitHub-side gates — the normal pull-request checks on the pushed head revision, and a manual probe dispatch against the PR branch whose run the pull request then links to. Probe 3's public A/B check is expected to stay red on dell-foo's stale system netrc, which is a `dev-infra` fix
 next_post_merge_action: none
 
 ## DELIVERABLES
@@ -275,7 +275,7 @@ Completion evidence:
 
 ### CHUNK 1.4 — Manual probes — COMPLETE
 
-Verified: 346 assertions across the three shell contract suites; actionlint and prettier clean; the pull-request exclusion traced through both gate terms.
+Verified: 407 assertions across the three shell contract suites (8 runner-map-transform, 167 setup-action-structure, 232 workflow-structure); actionlint and prettier clean; the pull-request exclusion traced through both gate terms and through the audit's `always()`.
 
 Notes a future developer needs and cannot read off the code:
 
@@ -286,7 +286,12 @@ Notes a future developer needs and cannot read off the code:
 - The fixture flake at `tests/org-read-probe` deliberately has NO committed `flake.lock`. A lock would let Nix serve the tree from the local store with no network fetch, defeating the probe.
 - `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` has to be workflow-level, which also affects `lints` and `setup-composite-smoke` on the normal pull-request path by forcing Node 24 for their JavaScript actions. Low risk, but a behaviour change whose only beneficiary is probe 3.
 - The public-repository A/B check matches the surrounding Nix error phrase (`HTTP error 403` / `exceeded its LFS budget`, and `HTTP error 422`), never a bare three-digit number. The log carries store paths and URLs, and a store hash containing `403` with no `422` present would read as a false green.
-- The log-leak check retries the job-log read five times before failing, because GitHub does not guarantee a 200 for a still-running job. It fails closed either way, with distinct messages for "log unreadable" and "credential leak" so a red is never ambiguous.
+- REDESIGNED 2026-07-30. The credential audit is no longer a step inside each probe. It is a separate job, `probe-log-credential-audit`, that `needs:` all three probes and reads their logs after they complete.
+- Two defects forced this, both found by live runs. (1) A job cannot read its own log: `GET /actions/jobs/{id}/logs` answers 404 for an in-progress job, so the in-job check failed closed on every run and could never pass. (2) The runner echoes every `run:` body into the job log, so the old check's own source line carrying the literal `PRIVATE KEY` would have matched itself — a guaranteed FALSE-POSITIVE leak the moment the 404 was fixed.
+- The audit is gated `always() && github.event_name == 'workflow_dispatch' && inputs.run-org-read-probes`. `always()` keeps a leak in a FAILED probe catchable; `always()` overrides only the implicit needs-succeeded condition, never an explicit term, so the same dispatch gate still keeps it off pull requests.
+- It fails closed on five distinct unscannable conditions — job list unreadable, paginated job list, no job matching an audited name, an audited job not completed, a completed log unreadable after retries — all prefixed `AUDIT INCOMPLETE, NOT A LEAK` so a red can never be misread as a leak. Only a log read in full can report `CREDENTIAL LEAK`.
+- It holds no App credential, needs no Nix, and the probes gave up their `actions: read` grant. It is also strictly wider than what it replaces: it scans probe 1's NESTED jobs, which could never have carried a step at all.
+- A suite assertion guards that the scan literals appear in no source the audit reads — `validate.yml` outside the audit job, plus `workflow.yml`, `setup/action.yml`, `auth/action.yml` and `auth/authenticate.sh` — so defect 2 cannot regress.
 
 DEVIATION from the original scope — probe 1 cannot do what the other two do:
 
@@ -318,16 +323,18 @@ Completion evidence:
 - The Actions run contains no private key, installation token, or credential artifact.
 - Each manual probe finishes within ten minutes, except probe 1, which cannot declare a timeout and inherits `workflow.yml`'s.
 
-### CHUNK 1.5 — Release gates
+### CHUNK 1.5 — Release gates — LOCAL GATES COMPLETE, PR-SIDE GATES OUTSTANDING
+
+Verified locally 2026-07-30 on the audit-redesign revision. The two remaining gates are GitHub-side and cannot be closed from the workstation.
 
 Completion evidence:
 
-- Prettier passes.
-- Actionlint passes.
-- All three shell contract suites pass when run directly; `nix flake check` does not execute them.
-- `nix flake check` passes.
-- The normal pull-request checks pass.
-- The pull request links to the successful manual probe run.
+- Prettier passes. VERIFIED — `prettier --check .` reports all matched files conform.
+- Actionlint passes. VERIFIED — clean, with the scoped `.github/actionlint.yaml` suppression still the only exception.
+- All three shell contract suites pass when run directly; `nix flake check` does not execute them. VERIFIED — 407 assertions, 0 failures: 8 runner-map-transform, 167 setup-action-structure, 232 workflow-structure. The runner-map suite needs `yq`, so run it as CI does, under `nix shell nixpkgs#yq-go`.
+- `nix flake check` passes. VERIFIED — `devShells` only, as CONSTRAINTS records; it evaluates no suite.
+- The normal pull-request checks pass. OUTSTANDING — awaits the pushed head revision.
+- The pull request links to the successful manual probe run. OUTSTANDING — awaits the dispatch against the pushed revision. Probe 3 is expected to stay red on an environment defect outside this repository: dell-foo's system `/etc/nix/netrc`, referenced by `netrc-file` in `/etc/nix/nix.conf`, holds a stale github.com entry that Nix's LFS curl path sends even to a public repository, so the public A/B check answers HTTP 401 "Bad credentials". That is a `dev-infra` runner-configuration fix, not a code fix here.
 
 ## POST-MERGE ACCEPTANCE
 

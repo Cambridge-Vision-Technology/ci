@@ -803,6 +803,8 @@ step_driven_probe_jobs=(
   probe-auth-action-self-hosted-org-read
 )
 probe_gate='if: ${{ github.event_name == '"'"'workflow_dispatch'"'"' && inputs.run-org-read-probes }}'
+audit_job=probe-log-credential-audit
+audit_gate='if: ${{ always() && github.event_name == '"'"'workflow_dispatch'"'"' && inputs.run-org-read-probes }}'
 
 # A job block ends at the next two-space key OR the next two-space comment,
 # because the prose that introduces the following job sits between them and
@@ -872,16 +874,51 @@ for probe_job in "${probe_jobs[@]}"; do
   fi
 done
 
-# Nothing an ungated job needs may name a probe, or the probe would be created
-# on a pull request despite its own gate.
-probe_dependents="$(awk '
-  /^[[:space:]]*needs:/ && index($0, "probe-") { count++ }
-  END { print count + 0 }
-' "$VALIDATE")"
-if [ "$probe_dependents" -eq 0 ]; then
-  pass "no job depends on a probe job"
+# Nothing UNGATED may need a probe, or the probe would be created on a pull
+# request despite its own gate. The log audit is the one permitted dependent,
+# and it carries the same gate, so the permitted set is exactly one name.
+# `needs:` is read as a block as well as inline, because the audit's dependency
+# list is a block sequence and an inline-only check would read it as absent.
+list_validate_jobs() {
+  awk '
+    /^jobs:/ { in_jobs = 1; next }
+    !in_jobs { next }
+    /^[a-zA-Z_]/ { in_jobs = 0; next }
+    /^  [a-zA-Z_][a-zA-Z0-9_-]*:[[:space:]]*$/ {
+      sub(/:[[:space:]]*$/, "")
+      sub(/^  /, "")
+      print
+    }
+  ' "$VALIDATE"
+}
+
+job_needs_a_probe() {
+  printf '%s\n' "$1" | awk '
+    /^[[:space:]]*needs:/ {
+      in_needs = 1
+      if (index($0, "probe-")) { found = 1 }
+      next
+    }
+    in_needs && /^[[:space:]]*-[[:space:]]/ {
+      if (index($0, "probe-")) { found = 1 }
+      next
+    }
+    in_needs && /[^[:space:]]/ { in_needs = 0 }
+    END { exit !found }
+  '
+}
+
+probe_dependent_jobs=""
+while IFS= read -r validate_job; do
+  if job_needs_a_probe "$(extract_validate_job "$validate_job")"; then
+    probe_dependent_jobs="$probe_dependent_jobs$validate_job "
+  fi
+done < <(list_validate_jobs)
+
+if [ "$probe_dependent_jobs" = "$audit_job " ]; then
+  pass "the log audit is the only job that depends on a probe job"
 else
-  fail "$probe_dependents jobs declare needs: on a probe job"
+  fail "jobs depending on a probe are '$probe_dependent_jobs', expected only '$audit_job'"
 fi
 
 # The three ordinary validation jobs stay ungated, so the probes cannot have
@@ -1063,11 +1100,6 @@ for probe_job in "${step_driven_probe_jobs[@]}"; do
     fail "$probe_job does not treat a 422 from the A/B check as a hard failure"
   fi
 
-  if echo "$probe_block" | grep -qF "name: Verify this job's log contains no credential material"; then
-    pass "$probe_job checks its own log for credential material"
-  else
-    fail "$probe_job does not check its own log for credential material"
-  fi
 done
 
 setup_probe_block="$(extract_validate_job probe-setup-action-org-read)"
@@ -1118,6 +1150,269 @@ if awk '
 else
   fail "FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 is not set at workflow level, so the self-hosted probe cannot mint a token"
 fi
+
+# --- The probe log credential audit ---
+#
+# The audit is a SEPARATE job on purpose. A job cannot read its own log — the
+# jobs/{id}/logs endpoint answers 404 while the job is in progress — so the
+# in-job version this replaces failed closed on every single run and could
+# never pass. Worse, the runner echoes each `run:` body into the log, so an
+# in-job scan would have matched its own source and reported a false-positive
+# leak the moment the 404 was fixed. Both defects are structural, and only a
+# job that runs after the probes and is never itself audited removes them.
+
+audit_block="$(extract_validate_job "$audit_job")"
+
+if [ -n "$audit_block" ]; then
+  pass "the probe log credential audit job exists: $audit_job"
+else
+  fail "the probe log credential audit job is missing: $audit_job"
+fi
+
+# always() overrides only the implicit needs-succeeded condition, never an
+# explicit term, so the dispatch gate on the same line still excludes a pull
+# request while a FAILED probe's log is still scanned.
+if echo "$audit_block" | grep -qF "$audit_gate"; then
+  pass "the audit carries always() plus the identical dispatch gate the probes carry"
+else
+  fail "the audit does not carry always() plus the probes' dispatch gate"
+fi
+
+if echo "$audit_block" | grep -qF "github.event_name == 'workflow_dispatch'"; then
+  pass "the audit is gated on the workflow_dispatch event"
+else
+  fail "the audit is not gated on the workflow_dispatch event, so a pull request could run it"
+fi
+
+if echo "$audit_block" | grep -qF 'inputs.run-org-read-probes'; then
+  pass "the audit is gated on the explicit run-org-read-probes opt-in"
+else
+  fail "the audit is not gated on the run-org-read-probes opt-in, so a plain dispatch would run it"
+fi
+
+if echo "$audit_block" | grep -qF 'always()'; then
+  pass "the audit runs even when a probe failed, so a leak in a failed probe is still caught"
+else
+  fail "the audit skips when a probe failed, so a leak in a failed probe would go unscanned"
+fi
+
+# Waiting on the probes is the whole fix: a needed job has completed, so its log
+# is flushed and retrievable rather than 404.
+for probe_job in "${probe_jobs[@]}"; do
+  if echo "$audit_block" | awk -v needle="- $probe_job" '
+    /^[[:space:]]*needs:/ { in_needs = 1; next }
+    in_needs && index($0, needle) { found = 1 }
+    in_needs && /^[[:space:]]*[a-zA-Z_]/ { in_needs = 0 }
+    END { exit !found }
+  '; then
+    pass "the audit waits for $probe_job to complete before reading its log"
+  else
+    fail "the audit does not wait for $probe_job, so its log may still be unreadable"
+  fi
+
+  if echo "$audit_block" | awk -v needle="$probe_job" '
+    index($0, "AUDITED_PROBE_JOBS:") { in_list = 1; next }
+    in_list && !/^        [^ ]/ { in_list = 0 }
+    in_list && index($0, needle) { found = 1 }
+    END { exit !found }
+  '; then
+    pass "the audit scans the log of $probe_job"
+  else
+    fail "the audit does not scan the log of $probe_job"
+  fi
+done
+
+# The audit's own log is the one log that legitimately holds the scan patterns,
+# so auditing itself would be a guaranteed false-positive leak.
+if echo "$audit_block" | grep -qF "$audit_job"; then
+  fail "the audit names itself in its own body, so it can wait on or scan itself"
+else
+  pass "the audit never waits on or scans its own log"
+fi
+
+audited_names="$(echo "$audit_block" | awk '
+  index($0, "AUDITED_PROBE_JOBS:") { in_list = 1; next }
+  in_list && !/^        [^ ]/ { in_list = 0 }
+  in_list && index($0, "probe-") { count++ }
+  END { print count + 0 }
+')"
+if [ "$audited_names" -eq "${#probe_jobs[@]}" ]; then
+  pass "the audit scans exactly the ${#probe_jobs[@]} probe jobs and nothing else"
+else
+  fail "the audit scans $audited_names jobs, expected exactly ${#probe_jobs[@]}"
+fi
+
+if echo "$audit_block" | grep -qF 'runs-on: ubuntu-latest'; then
+  pass "the audit runs on a GitHub-hosted Linux runner"
+else
+  fail "the audit does not run on a GitHub-hosted Linux runner"
+fi
+
+if echo "$audit_block" | grep -qF 'timeout-minutes: 10'; then
+  pass "the audit is bounded to ten minutes"
+else
+  fail "the audit is not bounded to ten minutes"
+fi
+
+if echo "$audit_block" | grep -qF 'actions: read'; then
+  pass "the audit holds the actions: read permission it needs to read job logs"
+else
+  fail "the audit cannot read job logs without the actions: read permission"
+fi
+
+# It reads logs and nothing else: no token is minted for it, and it fetches
+# nothing, so it holds no credential that could enter the log it writes.
+if echo "$audit_block" | grep -qF 'id-token: write'; then
+  fail "the audit requests id-token: write, which it has no use for"
+else
+  pass "the audit requests no id-token: write"
+fi
+
+if echo "$audit_block" | grep -qF 'CI_FETCH_APP'; then
+  fail "the audit is handed App credentials it has no use for"
+else
+  pass "the audit is handed no App credentials"
+fi
+
+for audit_surface in 'uses: ./setup' 'uses: ./auth' 'uses: ./.github/workflows/workflow.yml'; do
+  if echo "$audit_block" | grep -qF "$audit_surface"; then
+    fail "the audit invokes $audit_surface, so it authenticates rather than only auditing"
+  else
+    pass "the audit does not invoke $audit_surface"
+  fi
+done
+
+# Fail closed, and say WHICH failure it is. Every branch that cannot complete
+# the scan reports the cannot-read wording; only a log that was read in full
+# can report a leak.
+audit_incomplete_conditions=(
+  "this run's job list could not be read"
+  "were returned on one page"
+  "or nested under it, so its log was never scanned"
+  "rather than completed"
+  "could not be read after 3 attempts"
+)
+for audit_incomplete_condition in "${audit_incomplete_conditions[@]}"; do
+  if echo "$audit_block" | grep -qF "::error::AUDIT INCOMPLETE, NOT A LEAK: " &&
+    echo "$audit_block" | grep -qF "$audit_incomplete_condition"; then
+    pass "the audit fails closed when it cannot scan: $audit_incomplete_condition"
+  else
+    fail "the audit does not fail closed when it cannot scan: $audit_incomplete_condition"
+  fi
+done
+
+audit_incomplete_branches="$(echo "$audit_block" | awk '
+  index($0, "::error::AUDIT INCOMPLETE, NOT A LEAK:") { count++ }
+  END { print count + 0 }
+')"
+if [ "$audit_incomplete_branches" -eq "${#audit_incomplete_conditions[@]}" ]; then
+  pass "all ${#audit_incomplete_conditions[@]} unscannable conditions fail closed, and no other branch claims to"
+else
+  fail "$audit_incomplete_branches branches report an unscannable condition, expected ${#audit_incomplete_conditions[@]}"
+fi
+
+if echo "$audit_block" | grep -qF '::error::CREDENTIAL LEAK: '; then
+  pass "a credential found in a fully-read log is reported as a leak"
+else
+  fail "the audit reports no distinct credential-leak failure"
+fi
+
+# The two reds must never read alike: one means nothing was ruled out, the other
+# means something was found.
+if echo "$audit_block" | grep -qF 'was read in full and contains'; then
+  pass "the leak wording states the log was read in full, distinguishing it from the cannot-read failure"
+else
+  fail "the leak wording does not distinguish itself from the cannot-read failure"
+fi
+
+# A success exit anywhere inside the audit would let a branch that skipped the
+# scan report green.
+if echo "$audit_block" | grep -qE 'exit 0'; then
+  fail "the audit contains an 'exit 0', so some branch can report success without scanning"
+else
+  pass "the audit contains no early success exit"
+fi
+
+# Matched credential material is never echoed: only -q greps run over a job log,
+# so the audit can never become the leak it reports.
+audit_non_quiet_greps="$(echo "$audit_block" | awk '
+  index($0, "grep ") && !index($0, "grep -q") { count++ }
+  END { print count + 0 }
+')"
+if [ "$audit_non_quiet_greps" -eq 0 ]; then
+  pass "the audit only ever greps quietly, so it cannot print matched credential material"
+else
+  fail "the audit runs $audit_non_quiet_greps non-quiet greps, which could print a credential"
+fi
+
+if echo "$audit_block" | grep -qF "grep -q 'PRIVATE KEY'" &&
+  echo "$audit_block" | grep -qF 'gh[psu]_'; then
+  pass "the audit scans for both installation-token and private-key material"
+else
+  fail "the audit does not scan for both installation-token and private-key material"
+fi
+
+if echo "$audit_block" | grep -qF '|| true'; then
+  fail "the audit uses '|| true' (fail-fast violation)"
+else
+  pass "the audit contains no '|| true'"
+fi
+
+# --- The scan patterns may not appear in any log the audit reads ---
+#
+# The runner echoes every `run:` body into the job log under its "Run" group. A
+# scan literal sitting in an audited job's source is therefore GUARANTEED to
+# appear in the log that job produces, and the audit would match its own words
+# and report a leak that does not exist. This is not hypothetical: it is the
+# second defect in the in-job design that this job replaces.
+
+validate_outside_audit="$(awk -v job="  $audit_job:" '
+  $0 == job { in_audit = 1; next }
+  in_audit && /^  [a-zA-Z_#]/ { in_audit = 0 }
+  !in_audit { print }
+' "$VALIDATE")"
+
+for scan_literal in 'PRIVATE KEY' '[A-Za-z0-9_]{20,}'; do
+  literal_outside_audit="$(printf '%s\n' "$validate_outside_audit" | awk -v needle="$scan_literal" '
+    index($0, needle) { count++ }
+    END { print count + 0 }
+  ')"
+  if [ "$literal_outside_audit" -eq 0 ]; then
+    pass "the scan literal '$scan_literal' appears in no job the audit reads"
+  else
+    fail "the scan literal '$scan_literal' appears $literal_outside_audit times in a job the audit reads, which is a guaranteed false positive"
+  fi
+done
+
+# Probe 1's log is produced by the reusable workflow and the composites it
+# calls, so their sources have to stay clear of the scan literals too.
+for audited_source in "$WORKFLOW" "$SETUP_ACTION" "$REPO_ROOT/auth/action.yml" "$REPO_ROOT/auth/authenticate.sh"; do
+  if grep -qF 'PRIVATE KEY' "$audited_source"; then
+    fail "$(basename "$audited_source") contains the literal 'PRIVATE KEY', which the audit would match in a probe log"
+  else
+    pass "$(basename "$audited_source") contains no scan literal the audit would match"
+  fi
+done
+
+# --- No probe reads a job log itself any more ---
+#
+# The regression this whole redesign exists to prevent: a running job asking
+# GitHub for its own log gets a 404 and fails closed forever.
+
+for probe_job in "${probe_jobs[@]}"; do
+  probe_block="$(extract_validate_job "$probe_job")"
+  if echo "$probe_block" | grep -qF 'actions/jobs/'; then
+    fail "$probe_job reads a job log from inside itself, which 404s while the job runs"
+  else
+    pass "$probe_job reads no job log from inside itself"
+  fi
+
+  if echo "$probe_block" | grep -qF 'actions: read'; then
+    fail "$probe_job still requests actions: read, which only a log reader needs"
+  else
+    pass "$probe_job requests no actions: read permission"
+  fi
+done
 
 # --- Probes stay read-only and leak nothing ---
 
