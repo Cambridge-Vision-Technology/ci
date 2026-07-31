@@ -578,9 +578,12 @@ fi
 # own credential, and any other machine is none of our business.
 
 netrc_shape_guards=(
-  'tokens[1] == "machine" && tokens[2] == "github.com"'
-  'tokens[3] == "login" && tokens[4] == "x-access-token"'
-  'token_count == 6'
+  '[ "${legacy_netrc_entry_tokens[0]}" = "machine" ] &&'
+  '[ "${legacy_netrc_entry_tokens[1]}" = "github.com" ] &&'
+  '[ "${legacy_netrc_entry_tokens[2]}" = "login" ] &&'
+  '[ "${legacy_netrc_entry_tokens[3]}" = "x-access-token" ] &&'
+  '[ "${legacy_netrc_entry_tokens[4]}" = "password" ]; then'
+  '[ "${#legacy_netrc_entry_tokens[@]}" -eq 6 ] &&'
 )
 for netrc_shape_guard in "${netrc_shape_guards[@]}"; do
   if grep -qF "$netrc_shape_guard" "$AUTH_SCRIPT"; then
@@ -593,9 +596,9 @@ done
 # Without a per-entry keep branch the filter would drop the whole file rather
 # than the one entry, which is exactly what "not ours to destroy" forbids.
 if awk '
-  $0 == "remove_legacy_home_netrc() {" { in_function = 1; next }
+  $0 == "flush_legacy_netrc_entry() {" { in_function = 1; next }
   in_function && /^\}$/ { in_function = 0 }
-  in_function && index($0, "if (keep) {") { found = 1 }
+  in_function && index($0, "keep_legacy_line \"$line\"") { found = 1 }
   END { exit !found }
 ' "$AUTH_SCRIPT"; then
   pass "the netrc filter keeps every entry it did not identify as this repository's"
@@ -603,7 +606,7 @@ else
   fail "the netrc filter has no keep branch, so entries that are not ours are not preserved"
 fi
 
-if grep -qF '$1 == "machine" || $1 == "default"' "$AUTH_SCRIPT"; then
+if grep -qF '{ [ "${line_tokens[0]}" = "machine" ] || [ "${line_tokens[0]}" = "default" ]; }' "$AUTH_SCRIPT"; then
   pass "the netrc filter splits the file into entries, so a mixed file loses only our entry"
 else
   fail "the netrc filter does not split the file into entries, so it cannot remove one entry from a mixed file"
@@ -611,7 +614,7 @@ fi
 
 # --- The git-credentials removal is confined to the line this repository wrote ---
 
-if grep -qF "awk '!/^https:\\/\\/x-access-token:[^@\\/]*@github\\.com\\/?\$/'" "$AUTH_SCRIPT"; then
+if grep -qF '[[ $line =~ ^https://x-access-token:[^@/]*@github\.com/?$ ]]' "$AUTH_SCRIPT"; then
   pass "the git-credentials removal is confined to the https://x-access-token:<token>@github.com line"
 else
   fail "the git-credentials removal is not confined to this repository's own credential line"
@@ -643,7 +646,7 @@ fi
 
 # --- The Nix configuration keeps every setting except the one we wrote ---
 
-if grep -qF 'if (key == "netrc-file" && value == "/tmp/netrc") {' "$AUTH_SCRIPT"; then
+if grep -qF '[ "$(trimmed "$key")" = "netrc-file" ] && [ "$(trimmed "$value")" = "/tmp/netrc" ]; then' "$AUTH_SCRIPT"; then
   pass "only a netrc-file that still names the fixed path is removed from the user nix.conf"
 else
   fail "the user nix.conf filter is not confined to netrc-file = /tmp/netrc, so a machine owner's setting could be destroyed"
@@ -652,7 +655,7 @@ fi
 if awk '
   $0 == "remove_legacy_nix_conf_netrc_file() {" { in_function = 1; next }
   in_function && /^\}$/ { in_function = 0 }
-  in_function && $0 ~ /^[[:space:]]*print$/ { found = 1 }
+  in_function && index($0, "keep_legacy_line \"$line\"") { found = 1 }
   END { exit !found }
 ' "$AUTH_SCRIPT"; then
   pass "every other line of the user nix.conf is printed back unchanged"
@@ -662,7 +665,7 @@ fi
 
 # --- Filtered files are replaced in place, or removed when nothing is left ---
 
-if grep -qF 'cat "$filtered" > "$target"' "$AUTH_SCRIPT"; then
+if grep -qF 'printf '"'"'%s\n'"'"' "${legacy_kept_lines[@]}" > "$target"' "$AUTH_SCRIPT"; then
   pass "a surviving file is rewritten in place, keeping the machine owner's inode, mode and ownership"
 else
   fail "a surviving file is not rewritten in place, so the machine owner's mode or ownership can change"
@@ -671,7 +674,7 @@ fi
 if awk '
   $0 == "apply_legacy_filter() {" { in_function = 1; next }
   in_function && /^\}$/ { in_function = 0 }
-  in_function && index($0, "if file_has_content \"$filtered\"; then") { guard = 1 }
+  in_function && index($0, "if [ \"$has_content\" = true ]; then") { guard = 1 }
   in_function && index($0, "rm -f \"$target\"") { removal = 1 }
   END { exit !(guard && removal) }
 ' "$AUTH_SCRIPT"; then
@@ -681,17 +684,83 @@ else
 fi
 
 # A file this repository never wrote into must not be rewritten at all, so its
-# modification time and inode are evidence the cleanup left it alone.
-if grep -qF 'cmp -s "$target" "$filtered" || difference_status=$?' "$AUTH_SCRIPT"; then
-  pass "an unchanged file is detected by comparison and left completely untouched"
+# modification time and inode are evidence the cleanup left it alone. The filter
+# that recognised its own handiwork is the only thing that may authorise a
+# rewrite, and it says so by raising legacy_removed_entry.
+if grep -qF 'if [ "$legacy_removed_entry" != true ]; then' "$AUTH_SCRIPT"; then
+  pass "an unchanged file is detected before any rewrite and left completely untouched"
 else
-  fail "the cleanup does not compare before rewriting, so it touches files it changed nothing in"
+  fail "the cleanup does not check whether it removed anything before rewriting, so it touches files it changed nothing in"
 fi
 
-if grep -qF 'if [ "$difference_status" -ne 1 ]; then' "$AUTH_SCRIPT"; then
-  pass "a comparison that failed to read either file is a hard error, not a silent 'they differ'"
+if grep -qF 'legacy_removed_entry=false' "$AUTH_SCRIPT" &&
+  awk '
+    $0 == "reset_legacy_filter() {" { in_function = 1; next }
+    in_function && /^\}$/ { in_function = 0 }
+    in_function && index($0, "legacy_removed_entry=false") { found = 1 }
+    END { exit !found }
+  ' "$AUTH_SCRIPT"; then
+  pass "each filter starts from a clean slate, so one file's removal cannot authorise rewriting the next"
 else
-  fail "the cleanup treats an unreadable comparison as a difference, which would rewrite a file it never read"
+  fail "the removal flag is not reset per file, so a rewrite can be authorised by a different file's match"
+fi
+
+# --- The cleanup runs on a runner whose service PATH has no awk ---
+#
+# REGRESSION GUARD. The first revision of this cleanup filtered with awk and
+# compared with cmp. A self-hosted runner service runs with a curated PATH, not
+# a login shell's: dell-foo's carries coreutils, git, grep, sed, jq and curl and
+# carries NEITHER gawk NOR diffutils, so the cleanup died with
+# `awk: command not found` on precisely the machine holding the leaked
+# credential. Every filter must therefore be bash builtins alone.
+
+legacy_cleanup_functions=(
+  reset_legacy_filter
+  keep_legacy_line
+  apply_legacy_filter
+  flush_legacy_netrc_entry
+  remove_legacy_home_netrc
+  remove_legacy_home_git_credentials
+  remove_legacy_fixed_path_netrc
+  remove_legacy_nix_conf_netrc_file
+  remove_legacy_credential_artifacts
+)
+forbidden_cleanup_commands=(awk sed cmp diff mktemp cat grep tr cut)
+for forbidden_cleanup_command in "${forbidden_cleanup_commands[@]}"; do
+  external_uses="$(awk -v needle="$forbidden_cleanup_command" -v names="${legacy_cleanup_functions[*]}" '
+    BEGIN { split(names, wanted, " ") }
+    /^[a-z_]+\(\) \{$/ {
+      current_function = $0
+      sub(/\(\) \{$/, "", current_function)
+      in_cleanup = 0
+      for (index_of_name in wanted) {
+        if (current_function == wanted[index_of_name]) {
+          in_cleanup = 1
+        }
+      }
+      next
+    }
+    /^\}$/ { in_cleanup = 0; next }
+    !in_cleanup { next }
+    /^[[:space:]]*#/ { next }
+    $0 ~ ("(^|[^[:alnum:]_./-])" needle "([[:space:]]|$)") { count++ }
+    END { print count + 0 }
+  ' "$AUTH_SCRIPT")"
+  if [ "$external_uses" -eq 0 ]; then
+    pass "the legacy cleanup does not shell out to '$forbidden_cleanup_command', so it works on a runner PATH without it"
+  else
+    fail "the legacy cleanup calls '$forbidden_cleanup_command' $external_uses times; a self-hosted runner service PATH may not carry it"
+  fi
+done
+
+# The cleanup no longer stages a filtered copy anywhere, so the token being
+# removed is never written back to disk in order to remove it.
+if grep -qF 'legacy-netrc.XXXXXXXX' "$AUTH_SCRIPT" ||
+  grep -qF 'legacy-git-credentials.XXXXXXXX' "$AUTH_SCRIPT" ||
+  grep -qF 'legacy-nix-conf.XXXXXXXX' "$AUTH_SCRIPT"; then
+  fail "the legacy cleanup stages a filtered copy on disk, which rewrites the credential it is removing"
+else
+  pass "the legacy cleanup filters in process, so it never stages a copy of the credential it removes"
 fi
 
 # --- Nix is reconfigured through the job-scoped environment, not HOME state ---

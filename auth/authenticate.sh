@@ -116,39 +116,63 @@ default_nix_user_conf_files() {
   printf '%s' "$files"
 }
 
-file_has_content() {
-  awk 'NF { found = 1 } END { exit !found }' "$1"
+# Every filter below is written in bash builtins alone — no awk, no sed, no cmp.
+# That is a hard requirement, not a preference. A self-hosted runner service
+# runs with a curated PATH rather than a login shell's: dell-foo's carries
+# coreutils, git, grep, sed, jq and curl, and carries NEITHER gawk NOR
+# diffutils. An awk in this cleanup is a `command not found` on exactly the
+# machines that hold the leaked credential, which is the one place the cleanup
+# has to work. bash itself is the only interpreter guaranteed to be present,
+# because it is what runs this script.
+#
+# Keeping the filters in-process also means no filtered COPY of a credential
+# file is ever written to disk. An awk pipeline had to stage one under
+# RUNNER_TEMP, which briefly put the very token being removed back on the
+# filesystem.
+
+# Scratch state shared by the filters. A filter appends the lines it is keeping
+# and raises legacy_removed_entry when it drops one this repository wrote.
+legacy_kept_lines=()
+legacy_removed_entry=false
+
+reset_legacy_filter() {
+  legacy_kept_lines=()
+  legacy_removed_entry=false
+}
+
+keep_legacy_line() {
+  legacy_kept_lines+=("$1")
 }
 
 # Rewrites a machine-owner file only when the filter actually removed one of
-# this repository's own entries. A file we never wrote into is left with its
-# original inode, mode, owner and modification time untouched. When our entry
-# was the only thing in it, the file goes away entirely rather than being left
-# as an empty stub the machine owner never asked for. Redirecting into the
-# target rather than moving a temporary file over it keeps the machine owner's
-# inode, mode and ownership even when the file does survive.
+# this repository's own entries. legacy_removed_entry is that decision, taken by
+# the filter that recognised its own handiwork; a file we never wrote into never
+# raises it and is left with its original inode, mode, owner and modification
+# time untouched. When our entry was the only thing in it, the file goes away
+# entirely rather than being left as an empty stub the machine owner never asked
+# for. Redirecting into the target rather than moving a new file over it keeps
+# the machine owner's inode, mode and ownership even when the file does survive.
 apply_legacy_filter() {
-  local target="$1" filtered="$2" description="$3"
-  local difference_status=0
-  cmp -s "$target" "$filtered" || difference_status=$?
-  if [ "$difference_status" -eq 0 ]; then
-    rm -f "$filtered"
+  local target="$1" description="$2"
+  local line has_content=false
+  if [ "$legacy_removed_entry" != true ]; then
     return 0
   fi
-  # cmp answers 1 for "the files differ" and 2 or more for "I could not read
-  # them", which is not a result this script may act on.
-  if [ "$difference_status" -ne 1 ]; then
-    echo "authenticate.sh: could not compare ${target} with its filtered copy (cmp status ${difference_status})" >&2
-    exit "$difference_status"
-  fi
-  if file_has_content "$filtered"; then
-    cat "$filtered" > "$target"
+  for line in ${legacy_kept_lines[@]+"${legacy_kept_lines[@]}"}; do
+    case "$line" in
+      *[![:space:]]*)
+        has_content=true
+        break
+        ;;
+    esac
+  done
+  if [ "$has_content" = true ]; then
+    printf '%s\n' "${legacy_kept_lines[@]}" > "$target"
     echo "authenticate.sh: removed a legacy ${description} from ${target}; every other entry in it was preserved" >&2
   else
     rm -f "$target"
     echo "authenticate.sh: removed ${target}, which held nothing but a legacy ${description}" >&2
   fi
-  rm -f "$filtered"
 }
 
 # A netrc belongs to the machine owner, so only entries with the exact shape
@@ -164,50 +188,76 @@ apply_legacy_filter() {
 # business. All of those survive. An entry is anything from a `machine` or
 # `default` token up to the next one, so a file that mixes ours with the
 # owner's loses only ours.
+legacy_netrc_entry_lines=()
+legacy_netrc_entry_tokens=()
+
+# Decides one accumulated entry. An entry is ours only when its tokens are
+# EXACTLY the six this repository emitted and nothing further, so an entry
+# carrying an account, a port or a second machine keyword is not ours and
+# survives. Anything not recognised is kept line for line, which is what makes a
+# mixed file lose only our entry.
+flush_legacy_netrc_entry() {
+  local line entry_is_ours=false
+  if [ "${#legacy_netrc_entry_lines[@]}" -eq 0 ]; then
+    return 0
+  fi
+  if [ "${#legacy_netrc_entry_tokens[@]}" -eq 6 ] &&
+    [ "${legacy_netrc_entry_tokens[0]}" = "machine" ] &&
+    [ "${legacy_netrc_entry_tokens[1]}" = "github.com" ] &&
+    [ "${legacy_netrc_entry_tokens[2]}" = "login" ] &&
+    [ "${legacy_netrc_entry_tokens[3]}" = "x-access-token" ] &&
+    [ "${legacy_netrc_entry_tokens[4]}" = "password" ]; then
+    entry_is_ours=true
+  fi
+  if [ "$entry_is_ours" = true ]; then
+    legacy_removed_entry=true
+  else
+    for line in "${legacy_netrc_entry_lines[@]}"; do
+      keep_legacy_line "$line"
+    done
+  fi
+  legacy_netrc_entry_lines=()
+  legacy_netrc_entry_tokens=()
+}
+
 remove_legacy_home_netrc() {
-  local netrc="${HOME}/.netrc" filtered
+  local netrc="${HOME}/.netrc" line token
+  local -a line_tokens=()
   [ -f "$netrc" ] || return 0
-  filtered="$(mktemp "${RUNNER_TEMP}/legacy-netrc.XXXXXXXX")"
-  awk '
-    function flush_entry(   position, keep) {
-      if (line_count == 0) {
-        return
-      }
-      keep = 1
-      if (token_count == 6 &&
-          tokens[1] == "machine" && tokens[2] == "github.com" &&
-          tokens[3] == "login" && tokens[4] == "x-access-token" &&
-          tokens[5] == "password") {
-        keep = 0
-      }
-      if (keep) {
-        for (position = 1; position <= line_count; position++) {
-          print lines[position]
-        }
-      }
-      line_count = 0
-      token_count = 0
-    }
-    $1 == "machine" || $1 == "default" { flush_entry() }
-    {
-      lines[++line_count] = $0
-      for (field = 1; field <= NF; field++) {
-        tokens[++token_count] = $field
-      }
-    }
-    END { flush_entry() }
-  ' "$netrc" > "$filtered"
-  apply_legacy_filter "$netrc" "$filtered" "machine github.com / login x-access-token netrc entry"
+  reset_legacy_filter
+  legacy_netrc_entry_lines=()
+  legacy_netrc_entry_tokens=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    read -ra line_tokens <<< "$line"
+    # A `machine` or `default` keyword opens the next entry, so the one being
+    # accumulated is complete and can be decided.
+    if [ "${#line_tokens[@]}" -gt 0 ] &&
+      { [ "${line_tokens[0]}" = "machine" ] || [ "${line_tokens[0]}" = "default" ]; }; then
+      flush_legacy_netrc_entry
+    fi
+    legacy_netrc_entry_lines+=("$line")
+    for token in ${line_tokens[@]+"${line_tokens[@]}"}; do
+      legacy_netrc_entry_tokens+=("$token")
+    done
+  done < "$netrc"
+  flush_legacy_netrc_entry
+  apply_legacy_filter "$netrc" "machine github.com / login x-access-token netrc entry"
 }
 
 # Earlier revisions wrote exactly one line here. Any other line is the machine
 # owner's or another tool's and is preserved verbatim.
 remove_legacy_home_git_credentials() {
-  local git_credentials="${HOME}/.git-credentials" filtered
+  local git_credentials="${HOME}/.git-credentials" line
   [ -f "$git_credentials" ] || return 0
-  filtered="$(mktemp "${RUNNER_TEMP}/legacy-git-credentials.XXXXXXXX")"
-  awk '!/^https:\/\/x-access-token:[^@\/]*@github\.com\/?$/' "$git_credentials" > "$filtered"
-  apply_legacy_filter "$git_credentials" "$filtered" "https://x-access-token:<token>@github.com credential line"
+  reset_legacy_filter
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ $line =~ ^https://x-access-token:[^@/]*@github\.com/?$ ]]; then
+      legacy_removed_entry=true
+      continue
+    fi
+    keep_legacy_line "$line"
+  done < "$git_credentials"
+  apply_legacy_filter "$git_credentials" "https://x-access-token:<token>@github.com credential line"
 }
 
 # A fixed path this repository invented, so unlike the files above there is no
@@ -231,25 +281,21 @@ remove_legacy_fixed_path_netrc() {
 # repository invented. Every other setting in the file is the machine owner's,
 # including a netrc-file that names any other path.
 remove_legacy_nix_conf_netrc_file() {
-  local nix_conf="${XDG_CONFIG_HOME:-${HOME}/.config}/nix/nix.conf" filtered
+  local nix_conf="${XDG_CONFIG_HOME:-${HOME}/.config}/nix/nix.conf" line key value
   [ -f "$nix_conf" ] || return 0
-  filtered="$(mktemp "${RUNNER_TEMP}/legacy-nix-conf.XXXXXXXX")"
-  awk '
-    {
-      separator = index($0, "=")
-      if (separator > 0) {
-        key = substr($0, 1, separator - 1)
-        value = substr($0, separator + 1)
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-        if (key == "netrc-file" && value == "/tmp/netrc") {
-          next
-        }
-      }
-      print
-    }
-  ' "$nix_conf" > "$filtered"
-  apply_legacy_filter "$nix_conf" "$filtered" "netrc-file = /tmp/netrc setting"
+  reset_legacy_filter
+  while IFS= read -r line || [ -n "$line" ]; do
+    key="${line%%=*}"
+    if [ "$key" != "$line" ]; then
+      value="${line#*=}"
+      if [ "$(trimmed "$key")" = "netrc-file" ] && [ "$(trimmed "$value")" = "/tmp/netrc" ]; then
+        legacy_removed_entry=true
+        continue
+      fi
+    fi
+    keep_legacy_line "$line"
+  done < "$nix_conf"
+  apply_legacy_filter "$nix_conf" "netrc-file = /tmp/netrc setting"
 }
 
 remove_legacy_credential_artifacts() {
@@ -287,7 +333,8 @@ fi
 # machines that need it most untouched. First, because everything below either
 # writes the replacement credentials or points Nix at them, and none of that
 # should race a stale file that Nix's default user-config list still names.
-# It needs only RUNNER_TEMP for scratch space, which is validated above.
+# It needs no scratch space and no external command: every filter runs in bash
+# builtins, so it also works on a runner whose service PATH carries no awk.
 remove_legacy_credential_artifacts
 
 rm -f "${RUNNER_TEMP}"/github-org-read-netrc.* \
