@@ -17,8 +17,25 @@ set -euo pipefail
 #   HOME                      Location of the global git configuration.
 #
 # Every file this script writes that carries the token lives under RUNNER_TEMP
-# at mode 600. Nothing token-bearing is written into HOME, so no plaintext
-# credential survives the job on a self-hosted runner.
+# at mode 600. This script writes nothing into HOME and nothing at a fixed path,
+# so no plaintext credential it creates survives the job on a self-hosted runner.
+#
+# It does DELETE from HOME, and only there. Earlier revisions of this repository
+# wrote five credential artifacts and removed none of them:
+#
+#   $HOME/.netrc                                     machine github.com entry
+#   /tmp/netrc                                       the same entry, fixed path
+#   $HOME/.git-credentials                           https://x-access-token:…
+#   global credential.helper store                   bound to the file above
+#   ${XDG_CONFIG_HOME:-$HOME/.config}/nix/nix.conf   netrc-file = /tmp/netrc
+#
+# HOME and /tmp persist between jobs on a self-hosted runner, so those files
+# outlive the job that wrote them. A dead installation token was found in
+# plaintext in a runner user's HOME hours after its job ended, and any step that
+# runs before this script — or that loses NIX_USER_CONF_FILES — still picks the
+# stale token up and is answered 401 Bad credentials, even by a PUBLIC
+# repository. Removing them is therefore not optional and not conditional; see
+# remove_legacy_credential_artifacts.
 
 require_environment() {
   local name="$1"
@@ -99,6 +116,149 @@ default_nix_user_conf_files() {
   printf '%s' "$files"
 }
 
+file_has_content() {
+  awk 'NF { found = 1 } END { exit !found }' "$1"
+}
+
+# Rewrites a machine-owner file only when the filter actually removed one of
+# this repository's own entries. A file we never wrote into is left with its
+# original inode, mode, owner and modification time untouched. When our entry
+# was the only thing in it, the file goes away entirely rather than being left
+# as an empty stub the machine owner never asked for. Redirecting into the
+# target rather than moving a temporary file over it keeps the machine owner's
+# inode, mode and ownership even when the file does survive.
+apply_legacy_filter() {
+  local target="$1" filtered="$2" description="$3"
+  local difference_status=0
+  cmp -s "$target" "$filtered" || difference_status=$?
+  if [ "$difference_status" -eq 0 ]; then
+    rm -f "$filtered"
+    return 0
+  fi
+  # cmp answers 1 for "the files differ" and 2 or more for "I could not read
+  # them", which is not a result this script may act on.
+  if [ "$difference_status" -ne 1 ]; then
+    echo "authenticate.sh: could not compare ${target} with its filtered copy (cmp status ${difference_status})" >&2
+    exit "$difference_status"
+  fi
+  if file_has_content "$filtered"; then
+    cat "$filtered" > "$target"
+    echo "authenticate.sh: removed a legacy ${description} from ${target}; every other entry in it was preserved" >&2
+  else
+    rm -f "$target"
+    echo "authenticate.sh: removed ${target}, which held nothing but a legacy ${description}" >&2
+  fi
+  rm -f "$filtered"
+}
+
+# A netrc belongs to the machine owner, so only entries with the exact shape
+# earlier revisions of this repository emitted are removed:
+#
+#   machine github.com
+#   login x-access-token
+#   password <token>
+#
+# The match is on the whole entry, not on the machine name: a github.com entry
+# with any other login is the machine owner's own credential, an entry carrying
+# any further key is not one we wrote, and any other machine is none of our
+# business. All of those survive. An entry is anything from a `machine` or
+# `default` token up to the next one, so a file that mixes ours with the
+# owner's loses only ours.
+remove_legacy_home_netrc() {
+  local netrc="${HOME}/.netrc" filtered
+  [ -f "$netrc" ] || return 0
+  filtered="$(mktemp "${RUNNER_TEMP}/legacy-netrc.XXXXXXXX")"
+  awk '
+    function flush_entry(   position, keep) {
+      if (line_count == 0) {
+        return
+      }
+      keep = 1
+      if (token_count == 6 &&
+          tokens[1] == "machine" && tokens[2] == "github.com" &&
+          tokens[3] == "login" && tokens[4] == "x-access-token" &&
+          tokens[5] == "password") {
+        keep = 0
+      }
+      if (keep) {
+        for (position = 1; position <= line_count; position++) {
+          print lines[position]
+        }
+      }
+      line_count = 0
+      token_count = 0
+    }
+    $1 == "machine" || $1 == "default" { flush_entry() }
+    {
+      lines[++line_count] = $0
+      for (field = 1; field <= NF; field++) {
+        tokens[++token_count] = $field
+      }
+    }
+    END { flush_entry() }
+  ' "$netrc" > "$filtered"
+  apply_legacy_filter "$netrc" "$filtered" "machine github.com / login x-access-token netrc entry"
+}
+
+# Earlier revisions wrote exactly one line here. Any other line is the machine
+# owner's or another tool's and is preserved verbatim.
+remove_legacy_home_git_credentials() {
+  local git_credentials="${HOME}/.git-credentials" filtered
+  [ -f "$git_credentials" ] || return 0
+  filtered="$(mktemp "${RUNNER_TEMP}/legacy-git-credentials.XXXXXXXX")"
+  awk '!/^https:\/\/x-access-token:[^@\/]*@github\.com\/?$/' "$git_credentials" > "$filtered"
+  apply_legacy_filter "$git_credentials" "$filtered" "https://x-access-token:<token>@github.com credential line"
+}
+
+# A fixed path this repository invented, so unlike the files above there is no
+# machine-owner claim on it and no shape to check. On a self-hosted runner it is
+# also the artifact most likely to be another user's: /tmp is shared and sticky,
+# so only the owner may unlink it. That case is reported loudly and is NOT
+# fatal, because the alternative is failing every job on the runner forever over
+# a file no job is able to remove; the runner owner is the only one who can.
+remove_legacy_fixed_path_netrc() {
+  local fixed_path_netrc="/tmp/netrc"
+  [ -e "$fixed_path_netrc" ] || return 0
+  if [ -O "$fixed_path_netrc" ]; then
+    rm -f "$fixed_path_netrc"
+    echo "authenticate.sh: removed ${fixed_path_netrc}, a token-bearing file earlier revisions of this repository left at a fixed path" >&2
+    return 0
+  fi
+  echo "authenticate.sh: ${fixed_path_netrc} exists and belongs to another user, so this job cannot unlink it from a sticky /tmp. It may still carry a live token: the runner owner has to delete it." >&2
+}
+
+# Only the one setting, and only when it still points at the fixed path this
+# repository invented. Every other setting in the file is the machine owner's,
+# including a netrc-file that names any other path.
+remove_legacy_nix_conf_netrc_file() {
+  local nix_conf="${XDG_CONFIG_HOME:-${HOME}/.config}/nix/nix.conf" filtered
+  [ -f "$nix_conf" ] || return 0
+  filtered="$(mktemp "${RUNNER_TEMP}/legacy-nix-conf.XXXXXXXX")"
+  awk '
+    {
+      separator = index($0, "=")
+      if (separator > 0) {
+        key = substr($0, 1, separator - 1)
+        value = substr($0, separator + 1)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+        if (key == "netrc-file" && value == "/tmp/netrc") {
+          next
+        }
+      }
+      print
+    }
+  ' "$nix_conf" > "$filtered"
+  apply_legacy_filter "$nix_conf" "$filtered" "netrc-file = /tmp/netrc setting"
+}
+
+remove_legacy_credential_artifacts() {
+  remove_legacy_home_netrc
+  remove_legacy_home_git_credentials
+  remove_legacy_fixed_path_netrc
+  remove_legacy_nix_conf_netrc_file
+}
+
 require_environment ORG_READ_TOKEN
 require_environment ORG_READ_OWNER
 require_environment ORG_READ_ACCESS_ENABLED
@@ -118,6 +278,17 @@ if [ ! -d "$RUNNER_TEMP" ]; then
   echo "authenticate.sh: RUNNER_TEMP=${RUNNER_TEMP} is not a directory" >&2
   exit 1
 fi
+
+# Unconditional, and first. Unconditional because a leftover token harms every
+# job on the runner regardless of what the current job asked for: the DEFAULT
+# path — no organization access, repository token only — is exactly the path
+# that gets handed someone else's expired token and a 401 from a public
+# repository. Gating the cleanup on ORG_READ_ACCESS_ENABLED would leave the
+# machines that need it most untouched. First, because everything below either
+# writes the replacement credentials or points Nix at them, and none of that
+# should race a stale file that Nix's default user-config list still names.
+# It needs only RUNNER_TEMP for scratch space, which is validated above.
+remove_legacy_credential_artifacts
 
 rm -f "${RUNNER_TEMP}"/github-org-read-netrc.* \
   "${RUNNER_TEMP}"/github-org-read-credentials.* \
@@ -146,11 +317,13 @@ if [ -n "$system_netrc_file" ] && [ -e "$system_netrc_file" ]; then
 fi
 
 # The git binary reads a netrc only from $HOME/.netrc, which belongs to the
-# machine owner and is not ours to replace or delete. git gets the same token
-# through one credential helper bound to a job-scoped file instead. Each
-# consumer ends up with exactly one mechanism and neither duplicates the other:
-# Nix's LFS transfers cannot call a credential helper, and git cannot be
-# pointed at a netrc outside HOME.
+# machine owner: this script never writes a token there. The one thing it does
+# do to that file is take back the entry earlier revisions of this repository
+# put in it, which is a different claim — deleting our own leftover is not the
+# same as replacing the owner's file. git gets the token through one credential
+# helper bound to a job-scoped file instead. Each consumer ends up with exactly
+# one mechanism and neither duplicates the other: Nix's LFS transfers cannot
+# call a credential helper, and git cannot be pointed at a netrc outside HOME.
 git_credential_file="$(mktemp "${RUNNER_TEMP}/github-org-read-credentials.XXXXXXXX")"
 chmod 600 "$git_credential_file"
 printf 'https://x-access-token:%s@github.com\n' "$ORG_READ_TOKEN" > "$git_credential_file"

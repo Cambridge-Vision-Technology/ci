@@ -123,12 +123,25 @@ jobs:
           done
           # No token-bearing file is written into HOME, so nothing outlives the
           # job on a self-hosted runner, and no machine-owner state is replaced.
+          # These are stated as "carries no credential of ours" rather than
+          # "does not exist", because the machine owner's own entries in these
+          # files are preserved and a self-hosted runner legitimately has them.
           test ! -L "$HOME/.netrc" || { echo "$HOME/.netrc was replaced with a symlink" >&2; exit 1; }
-          test ! -e "$HOME/.git-credentials" || { echo "$HOME/.git-credentials was written" >&2; exit 1; }
+          if [[ -f "$HOME/.netrc" ]]; then
+            ! grep -q 'x-access-token' "$HOME/.netrc" ||
+              { echo "$HOME/.netrc still carries a login x-access-token entry" >&2; exit 1; }
+          fi
+          if [[ -f "$HOME/.git-credentials" ]]; then
+            ! grep -q 'x-access-token' "$HOME/.git-credentials" ||
+              { echo "$HOME/.git-credentials still carries an x-access-token credential" >&2; exit 1; }
+          fi
           if [[ -f "$HOME/.config/nix/nix.conf" ]]; then
             ! grep -qE '^[[:space:]]*(extra-)?access-tokens|^[[:space:]]*netrc-file' "$HOME/.config/nix/nix.conf" ||
               { echo "$HOME/.config/nix/nix.conf carries job credential settings" >&2; exit 1; }
           fi
+          # The fixed path earlier revisions invented. Nothing may recreate it,
+          # and the shared script removes any copy this runner user still owns.
+          test ! -e /tmp/netrc || { echo "/tmp/netrc survived the authentication step" >&2; exit 1; }
           # The exported NIX_USER_CONF_FILES has to take effect for a fresh nix
           # invocation, not just inside the step that wrote it.
           credential_file="$(find "$RUNNER_TEMP" -maxdepth 1 -name 'github-org-read-netrc.*' -print -quit)"
@@ -260,9 +273,29 @@ jobs:
           # and a store hash containing "403" with no "422" anywhere would
           # otherwise be read as a FALSE GREEN. A phrase that fails to match
           # falls through to the fail-closed branch at the end, which is a red.
+          #
+          # The isolation below is EXPLICIT, never subtractive. This check used
+          # to run under `env -u NIX_USER_CONF_FILES`, which did the opposite of
+          # what it claimed: unsetting that variable does not take Nix's user
+          # configuration out of scope, it makes Nix fall back to its DEFAULT
+          # user-config list, whose first entry is $HOME/.config/nix/nix.conf —
+          # exactly the file earlier revisions of this repository poisoned with
+          # `netrc-file = /tmp/netrc` on self-hosted runners. Nix then sent a
+          # stale token to a PUBLIC repository and was answered 401 Bad
+          # credentials, which is what broke this check on dell-foo.
+          # Pointing NIX_USER_CONF_FILES at an EMPTY file replaces that list
+          # instead of restoring it, and a command-line `--option` outranks
+          # every configuration file including the SYSTEM one, so neither the
+          # user's nix.conf nor /etc/nix/nix.conf can put a credential back.
+          empty_nix_conf="$RUNNER_TEMP/credential-free-nix.conf"
+          empty_netrc="$RUNNER_TEMP/credential-free-netrc"
+          : > "$empty_nix_conf"
+          : > "$empty_netrc"
           ab_log="$RUNNER_TEMP/public-lfs-ab.log"
           ab_status=0
-          env -u NIX_USER_CONF_FILES nix eval --impure --raw \
+          NIX_USER_CONF_FILES="$empty_nix_conf" nix eval --impure --raw \
+            --option netrc-file "$empty_netrc" \
+            --option access-tokens "" \
             --extra-experimental-features "nix-command flakes" \
             --expr '(builtins.fetchGit { url = "https://github.com/Apress/repo-with-large-file-storage"; ref = "master"; lfs = true; }).outPath' \
             > "$ab_log" 2>&1 || ab_status=$?
@@ -273,6 +306,13 @@ jobs:
           fi
           if grep -qE 'HTTP error 422' "$ab_log"; then
             echo "::error::HTTP 422 from the public Git-LFS endpoint: this Nix builds a malformed endpoint and is below 2.35.0. Treat every private Git-LFS result in this run as meaningless."
+            exit 1
+          fi
+          # A credential-free request cannot be rejected for its credential. If
+          # this fires, some host state still reached Nix and the isolation
+          # above needs fixing before any result in this run means anything.
+          if grep -qE 'HTTP error 401|Bad credentials' "$ab_log"; then
+            echo "::error::401 Bad credentials from a check that carries no credential: host state reached Nix despite the empty user configuration and the explicit netrc-file override. This is not an endpoint-discovery result."
             exit 1
           fi
           if grep -qE 'HTTP error 403|exceeded its LFS budget' "$ab_log"; then
@@ -393,9 +433,29 @@ jobs:
           # and a store hash containing "403" with no "422" anywhere would
           # otherwise be read as a FALSE GREEN. A phrase that fails to match
           # falls through to the fail-closed branch at the end, which is a red.
+          #
+          # The isolation below is EXPLICIT, never subtractive. This check used
+          # to run under `env -u NIX_USER_CONF_FILES`, which did the opposite of
+          # what it claimed: unsetting that variable does not take Nix's user
+          # configuration out of scope, it makes Nix fall back to its DEFAULT
+          # user-config list, whose first entry is $HOME/.config/nix/nix.conf —
+          # exactly the file earlier revisions of this repository poisoned with
+          # `netrc-file = /tmp/netrc` on self-hosted runners. Nix then sent a
+          # stale token to a PUBLIC repository and was answered 401 Bad
+          # credentials, which is what broke this check on dell-foo.
+          # Pointing NIX_USER_CONF_FILES at an EMPTY file replaces that list
+          # instead of restoring it, and a command-line `--option` outranks
+          # every configuration file including the SYSTEM one, so neither the
+          # user's nix.conf nor /etc/nix/nix.conf can put a credential back.
+          empty_nix_conf="$RUNNER_TEMP/credential-free-nix.conf"
+          empty_netrc="$RUNNER_TEMP/credential-free-netrc"
+          : > "$empty_nix_conf"
+          : > "$empty_netrc"
           ab_log="$RUNNER_TEMP/public-lfs-ab.log"
           ab_status=0
-          env -u NIX_USER_CONF_FILES nix eval --impure --raw \
+          NIX_USER_CONF_FILES="$empty_nix_conf" nix eval --impure --raw \
+            --option netrc-file "$empty_netrc" \
+            --option access-tokens "" \
             --extra-experimental-features "nix-command flakes" \
             --expr '(builtins.fetchGit { url = "https://github.com/Apress/repo-with-large-file-storage"; ref = "master"; lfs = true; }).outPath' \
             > "$ab_log" 2>&1 || ab_status=$?
@@ -406,6 +466,13 @@ jobs:
           fi
           if grep -qE 'HTTP error 422' "$ab_log"; then
             echo "::error::HTTP 422 from the public Git-LFS endpoint: this Nix builds a malformed endpoint and is below 2.35.0. Treat every private Git-LFS result in this run as meaningless."
+            exit 1
+          fi
+          # A credential-free request cannot be rejected for its credential. If
+          # this fires, some host state still reached Nix and the isolation
+          # above needs fixing before any result in this run means anything.
+          if grep -qE 'HTTP error 401|Bad credentials' "$ab_log"; then
+            echo "::error::401 Bad credentials from a check that carries no credential: host state reached Nix despite the empty user configuration and the explicit netrc-file override. This is not an endpoint-discovery result."
             exit 1
           fi
           if grep -qE 'HTTP error 403|exceeded its LFS budget' "$ab_log"; then
