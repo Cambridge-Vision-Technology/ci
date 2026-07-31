@@ -4,7 +4,7 @@ Linear: https://linear.app/aykua/issue/DEV-759/ci-own-ci-credential-acquisition-
 
 ## CURRENT STATUS
 
-pr_implementation_status: COMPLETE — PHASE 0 fully complete (CHUNKS 0.1 and 0.2) and PHASE 1 complete (CHUNKS 1.1 through 1.5), including the 2026-07-30 credential-audit redesign and the 2026-07-31 legacy-artifact self-heal; all gates green (490 assertions, prettier, actionlint, `nix flake check`, pull-request checks, and a manual probe dispatch in which ALL THREE probes and the credential audit passed). PR #23 remains a DRAFT awaiting human review and MUST STAY DRAFT
+pr_implementation_status: COMPLETE — PHASE 0 fully complete (CHUNKS 0.1 and 0.2) and PHASE 1 complete (CHUNKS 1.1 through 1.5), including the 2026-07-30 credential-audit redesign, the 2026-07-31 legacy-artifact self-heal, and the 2026-07-31 fourth probe on `macos-arm64-nix-darwin`; all gates green (568 assertions, prettier, actionlint, `nix flake check`, pull-request checks, and a manual probe dispatch in which ALL FOUR probes and the credential audit passed). PR #23 remains a DRAFT awaiting human review and MUST STAY DRAFT
 live_acceptance_status: NOT_APPLICABLE
 current_phase: PHASE 1
 current_chunk: CHUNK 1.5
@@ -199,7 +199,7 @@ CAVEAT — READ BEFORE TOUCHING THE MAC. `ci-runner-mac` PR #17 is OPEN, NOT MER
 
 Consequences and corrections:
 
-- The `aarch64-darwin` LFS-over-token gap is now closable. See CHUNK 1.4 — a darwin probe is POSSIBLE but has NOT been run.
+- The `aarch64-darwin` LFS-over-token gap is now CLOSED, not merely closable. See CHUNK 1.4 — the darwin probe `probe-auth-action-self-hosted-darwin-org-read` was added and run.
 - The earlier "darwin consumers are red until this lands" text is obsolete. It has landed; they are green. See CHUNK 1.2's completion evidence.
 - This repository's own PR CI was never affected: `validate.yml` uses `macos-latest`, which gets Nix 2.35.1 from the pinned `cachix/install-nix-action` v31.11.0.
 - The `.git`-suffix question in OPEN QUESTIONS is now moot as a way to avoid this chunk. Keep it recorded only as a possible fallback for any future sub-floor host.
@@ -220,7 +220,7 @@ Completion evidence:
 
 One PR-executable unit that leaves the shared workflow ready for immediate use.
 
-Self-hosted probes as shipped run on `x86_64-linux` (dell-foo, Nix 2.35.1) only, because at the time it was the sole self-hosted runner meeting the 2.35.0 floor. Since CHUNK 0.2, `admins-mac-mini` also meets it, so darwin probe coverage is now possible — see CHUNK 1.4. It has not been added. The guard itself is NOT scoped that way — it ships enforced on every platform, darwin included.
+Self-hosted probes now run on BOTH self-hosted platforms: `x86_64-linux` (dell-foo, Nix 2.35.1) and `macos-arm64-nix-darwin` (admins-mac-mini, Nix 2.35.1 since CHUNK 0.2). The darwin probe was added 2026-07-31 — see CHUNK 1.4. The guard itself was never scoped that way — it ships enforced on every platform, darwin included.
 
 ### CHUNK 1.1 — Implement the shared authentication contract — COMPLETE
 
@@ -295,10 +295,17 @@ Completion evidence:
 
 ### CHUNK 1.4 — Manual probes — COMPLETE
 
-Verified: 477 assertions across the three shell contract suites (8 runner-map-transform, 192 setup-action-structure, 277 workflow-structure); actionlint and prettier clean; the pull-request exclusion traced through both gate terms and through the audit's `always()`.
+Verified: 568 assertions across the three shell contract suites (8 runner-map-transform, 205 setup-action-structure, 355 workflow-structure); actionlint and prettier clean; the pull-request exclusion traced through both gate terms and through the audit's `always()`.
+
+There are now FOUR probes. `probe-auth-action-self-hosted-darwin-org-read` was added 2026-07-31 and exercises the standalone auth action on `macos-arm64-nix-darwin` (admins-mac-mini), the deliberate sibling of probe 3 — same structure, same proofs, same hardening, different platform. It proves LFS-over-token on `aarch64-darwin`, which was previously unproven because that runner sat below the 2.35.0 floor until CHUNK 0.2 and could not have passed the guard at all.
 
 Notes a future developer needs and cannot read off the code:
 
+- HARD REQUIREMENT for anyone adding a fifth probe: the new job name MUST go into BOTH `probe-log-credential-audit`'s `needs:` and its `AUDITED_PROBE_JOBS` list. Missing from `AUDITED_PROBE_JOBS`, the audit fails closed at runtime on "no job matching an audited name"; missing from `needs:`, it may read a log that is not yet flushed. A workflow-discovered parity assertion now enforces both: it reads the probe jobs OUT OF `validate.yml` rather than off the suite's own list, so extending suite and workflow together no longer hides drift.
+- `macos-arm64-nix-darwin` had to be registered in `.github/actionlint.yaml` under `self-hosted-runner.labels`. actionlint rejects any `runs-on` label it does not know, so without the registration it reds the `lints` job on EVERY pull request — long before a probe is ever dispatched. A suite assertion now ties each probe's declared label to that registration.
+- Darwin does NOT need `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24`. That DEV-757 requirement is specific to `[self-hosted, Linux, X64]`. Being workflow-level, the darwin probe inherits it anyway, harmlessly and at no cost.
+- Every command in the darwin probe is one that behaves identically on BSD and GNU userland, and the suite asserts the absence of `grep -P`, `readlink -f`, `sed -i`, `stat -c`, `stat -f`, `mktemp -p`, `awk` and `cmp` in every step-driven probe — the GNU-only spellings a BSD tool rejects, plus the tools simply absent from a runner service's curated PATH. Same discipline `auth/authenticate.sh` follows, for the same reason.
+- TWO PRE-EXISTING ASSERTIONS WERE FOUND TOO WEAK BY MUTATION TESTING and were strengthened. (1) The cold-cache clear must now be the job's FIRST step. Previously it only had to precede the first `uses: ./`, which allowed `actions/checkout` AND the credential-free A/B check to run against a warm cache — and the A/B check's entire value is that no earlier authenticated run has warmed it. (2) The runner-label coverage check now parses `runs-on:` out of the job block; previously it read back its own expected value, so it asserted the suite against itself and could not see the workflow drift.
 - The probes are gated on `github.event_name == 'workflow_dispatch' && inputs.run-org-read-probes`, and the input defaults to false. Neither a pull request nor a plain manual dispatch creates a probe job.
 - The LFS repository is `purescript-dedup` (~9 MB of objects), chosen over `oz` (295 MB) to stay inside the ten-minute budget.
 - The probes make SSH UNUSABLE — `SSH_AUTH_SOCK: ""` and `GIT_SSH_COMMAND: "false"` — rather than merely unused, so a `git+ssh` pass cannot mask a broken HTTPS path.
@@ -308,26 +315,27 @@ Notes a future developer needs and cannot read off the code:
 - The public-repository A/B check matches the surrounding Nix error phrase (`HTTP error 403` / `exceeded its LFS budget`, and `HTTP error 422`), never a bare three-digit number. The log carries store paths and URLs, and a store hash containing `403` with no `422` present would read as a false green.
 - CORRECTED 2026-07-31. The A/B check's isolation was `env -u NIX_USER_CONF_FILES`, which SELECTED the poisoned user `nix.conf` instead of escaping it — see the TRAP entry in CONSTRAINTS. It is now explicit: `NIX_USER_CONF_FILES` pointed at an EMPTY file, plus `--option netrc-file <empty>` and `--option access-tokens ""` on the command line so no configuration file, system one included, can put a credential back.
 - The A/B check now also fails closed on `HTTP error 401` / `Bad credentials`. A request that carries no credential cannot be rejected for its credential, so a 401 means the isolation leaked and no result in that run means anything. Previously a 401 fell through to the generic fail-closed branch and read as an unexplained red, which is what sent the 2026-07-30 diagnosis down the wrong path.
-- REDESIGNED 2026-07-30. The credential audit is no longer a step inside each probe. It is a separate job, `probe-log-credential-audit`, that `needs:` all three probes and reads their logs after they complete.
+- REDESIGNED 2026-07-30. The credential audit is no longer a step inside each probe. It is a separate job, `probe-log-credential-audit`, that `needs:` all four probes and reads their logs after they complete.
 - Two defects forced this, both found by live runs. (1) A job cannot read its own log: `GET /actions/jobs/{id}/logs` answers 404 for an in-progress job, so the in-job check failed closed on every run and could never pass. (2) The runner echoes every `run:` body into the job log, so the old check's own source line carrying the literal `PRIVATE KEY` would have matched itself — a guaranteed FALSE-POSITIVE leak the moment the 404 was fixed.
 - The audit is gated `always() && github.event_name == 'workflow_dispatch' && inputs.run-org-read-probes`. `always()` keeps a leak in a FAILED probe catchable; `always()` overrides only the implicit needs-succeeded condition, never an explicit term, so the same dispatch gate still keeps it off pull requests.
 - It fails closed on five distinct unscannable conditions — job list unreadable, paginated job list, no job matching an audited name, an audited job not completed, a completed log unreadable after retries — all prefixed `AUDIT INCOMPLETE, NOT A LEAK` so a red can never be misread as a leak. Only a log read in full can report `CREDENTIAL LEAK`.
 - It holds no App credential, needs no Nix, and the probes gave up their `actions: read` grant. It is also strictly wider than what it replaces: it scans probe 1's NESTED jobs, which could never have carried a step at all.
 - A suite assertion guards that the scan literals appear in no source the audit reads — `validate.yml` outside the audit job, plus `workflow.yml`, `setup/action.yml`, `auth/action.yml` and `auth/authenticate.sh` — so defect 2 cannot regress.
-- NEW OPTION, NOT DONE, recorded 2026-07-31. A fourth probe on `macos-arm64-nix-darwin` is now POSSIBLE: CHUNK 0.2 put that runner on Nix 2.35.1, so it meets the floor the earlier exclusion was based on. It would close the `aarch64-darwin` LFS-over-token gap, which is still unproven. This has NOT been implemented and is NOT claimed as done. Anyone adding it must also fold the new job name into `probe-log-credential-audit`'s audited-name list, or the audit fails closed on "no job matching an audited name". Note the CAVEAT in CHUNK 0.2 first — the mac's 2.35.1 currently comes from an unmerged branch deploy.
+- DONE 2026-07-31, previously recorded here as an option. The fourth probe on `macos-arm64-nix-darwin` exists, is wired into the audit's `needs:` and `AUDITED_PROBE_JOBS`, and closes the `aarch64-darwin` LFS-over-token gap. The CHUNK 0.2 CAVEAT still applies to the host itself — the mac's 2.35.1 comes from an unmerged branch deploy, so a `main` deploy would revert it and red this probe.
 
-DEVIATION from the original scope — probe 1 cannot do what the other two do:
+DEVIATION from the original scope — probe 1 cannot do what the other three do:
 
 - GitHub rejects `steps`, `env` AND `timeout-minutes` on a job that calls a reusable workflow with `uses:`; only `name`, `uses`, `with`, `secrets`, `needs`, `if` and `permissions` are allowed. Verified empirically against actionlint, each key independently.
 - Probe 1 therefore cannot clear the Nix caches, cannot disable SSH, cannot set a timeout, and cannot run the public-repository A/B check.
 - Its mitigations: it runs on `ubuntu-latest`, a fresh virtual machine with no pre-existing Nix cache and no SSH key or agent, so the cold cache and the absence of SSH hold by construction; it inherits `workflow.yml`'s build timeout; and `workflow.yml`'s own hard-coded 2.35.0 guard fails the job outright below the floor, which is the condition the A/B check would otherwise detect.
-- Probes 2 and 3 DO clear both `~/.cache/nix/gitv3` and the fetcher cache as their first step, and DO make SSH unusable.
+- Probes 2, 3 and 4 DO clear both `~/.cache/nix/gitv3` and the fetcher cache as their first step — asserted as the FIRST step, not merely an early one — and DO make SSH unusable.
 
 Original scope, for reference: extend the existing `workflow_dispatch` validation path with manual-only, read-only probes, gated on `github.event_name == 'workflow_dispatch'` plus an explicit opt-in input so ordinary dispatches of `validate.yml` do not pay for them.
 
 - Reusable workflow with organization access on GitHub-hosted Linux.
 - Setup action with organization access on GitHub-hosted Linux.
-- Standalone auth action on the self-hosted `x86_64-linux` runner (dell-foo, Nix 2.35.1), without the setup action. No darwin probe was in scope, because CHUNK 0.2 was deferred when this shipped.
+- Standalone auth action on the self-hosted `x86_64-linux` runner (dell-foo, Nix 2.35.1), without the setup action.
+- Standalone auth action on the self-hosted `macos-arm64-nix-darwin` runner (admins-mac-mini, Nix 2.35.1), without the setup action. ADDED 2026-07-31; out of scope at first shipping only because CHUNK 0.2 was deferred then.
 - NEW REQUIREMENT (DEV-757): the self-hosted probe must set `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` at WORKFLOW level, otherwise `actions/create-github-app-token` will not run on `[self-hosted, Linux, X64]`. This probe is the proof that `dev-infra`'s `build_workstation_index` job can adopt the standalone action.
 - Each probe clones private `infra-base`, resolves private `nix-shared` through its `git+ssh://` flake URL with App credentials and no SSH key, and resolves at least one LFS-bearing input.
 - Every probe that can run steps clears the Nix git and fetcher caches first. Without this the result is a false green. See the DEVIATION above for probe 1.
@@ -341,8 +349,8 @@ Testing method:
 Completion evidence:
 
 - Normal pull-request validation still exercises the unchanged default path without App credentials.
-- A manual dispatch against the PR branch passes all three organization-access paths.
-- Probe logs show the cold-cache step ran before any fetch, on the two probes that can carry steps.
+- A manual dispatch against the PR branch passes all four organization-access paths.
+- Probe logs show the cold-cache step ran first, before any fetch, on the three probes that can carry steps.
 - The Actions run contains no private key, installation token, or credential artifact.
 - Each manual probe finishes within ten minutes, except probe 1, which cannot declare a timeout and inherits `workflow.yml`'s.
 
@@ -363,7 +371,7 @@ Completion evidence:
 
 - Prettier passes. VERIFIED — `prettier --check .` reports all matched files conform.
 - Actionlint passes. VERIFIED — clean, with the scoped `.github/actionlint.yaml` suppression still the only exception.
-- All three shell contract suites pass when run directly; `nix flake check` does not execute them. VERIFIED — 490 assertions, 0 failures: 8 runner-map-transform, 205 setup-action-structure, 277 workflow-structure. The runner-map suite needs `yq`, so run it as CI does, under `nix shell nixpkgs#yq-go`. The count rose from 477 with the regression guards that fail if any cleanup function shells out at all, or if a filtered copy is ever staged on disk.
+- All three shell contract suites pass when run directly; `nix flake check` does not execute them. VERIFIED — 568 assertions, 0 failures: 8 runner-map-transform, 205 setup-action-structure, 355 workflow-structure. The runner-map suite needs `yq`, so run it as CI does, under `nix shell nixpkgs#yq-go`. The count rose from 477 to 490 with the regression guards that fail if any cleanup function shells out at all, or if a filtered copy is ever staged on disk, and from 490 to 568 with the darwin probe: its share of the per-probe loops, the workflow-discovered audit parity assertions, the actionlint label registration check, the both-platforms coverage check, and the two strengthened assertions.
 - `nix flake check` passes. VERIFIED — `devShells` only, as CONSTRAINTS records; it evaluates no suite.
 - The normal pull-request checks pass. VERIFIED — run 30610386952 on head `03d657e`, all green: `lints`, both `setup-composite-smoke` platforms, and the full `ci` matrix. The four probe jobs correctly report `skipping` on a pull request.
 - The pull request links to the successful manual probe run. VERIFIED — dispatch 30610388212 on head `03d657e` is green in every job, including all three probes and `probe-log-credential-audit`.

@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 WORKFLOW="$REPO_ROOT/.github/workflows/workflow.yml"
+ACTIONLINT_CONFIG="$REPO_ROOT/.github/actionlint.yaml"
 
 passed=0
 failed=0
@@ -797,10 +798,19 @@ probe_jobs=(
   probe-reusable-workflow-org-read
   probe-setup-action-org-read
   probe-auth-action-self-hosted-org-read
+  probe-auth-action-self-hosted-darwin-org-read
 )
 step_driven_probe_jobs=(
   probe-setup-action-org-read
   probe-auth-action-self-hosted-org-read
+  probe-auth-action-self-hosted-darwin-org-read
+)
+# The standalone auth action is proven once per self-hosted platform. darwin is
+# the platform LFS-over-token was never proven on, because that runner sat below
+# the 2.35.0 floor until the nix-darwin / nix-pin migration.
+self_hosted_auth_probes=(
+  probe-auth-action-self-hosted-org-read:x86_64-linux
+  probe-auth-action-self-hosted-darwin-org-read:macos-arm64-nix-darwin
 )
 probe_gate='if: ${{ github.event_name == '"'"'workflow_dispatch'"'"' && inputs.run-org-read-probes }}'
 audit_job=probe-log-credential-audit
@@ -1027,6 +1037,24 @@ for probe_job in "${step_driven_probe_jobs[@]}"; do
     fail "$probe_job clears the cache too late to prevent a false green"
   fi
 
+  # "Before the auth action" is not strict enough on its own: actions/checkout
+  # and the credential-free A/B check both run before it and both touch the
+  # network, and the A/B check's whole value is that it runs against a cache no
+  # earlier authenticated run has warmed. The clear has to be the FIRST step of
+  # the job, not merely an early one.
+  probe_first_step="$(printf '%s\n' "$probe_block" | awk '
+    /^      -[[:space:]]/ {
+      sub(/^[[:space:]]*-[[:space:]]*/, "")
+      print
+      exit
+    }
+  ')"
+  if [ "$probe_first_step" = "name: Clear the Nix git and fetcher caches" ]; then
+    pass "$probe_job clears the cache as its very first step"
+  else
+    fail "$probe_job's first step is '$probe_first_step', so something runs before the cache is cleared"
+  fi
+
   # A passing git+ssh fetch would prove nothing about the token path, so the
   # probe removes the SSH transport outright rather than merely not using it.
   if echo "$probe_block" | grep -qF 'SSH_AUTH_SOCK: ""' &&
@@ -1155,6 +1183,23 @@ for probe_job in "${step_driven_probe_jobs[@]}"; do
     fail "$probe_job does not treat a 422 from the A/B check as a hard failure"
   fi
 
+  # Every step-driven probe has to run unchanged on BSD userland and on a
+  # self-hosted runner service's curated PATH. That rules out two separate
+  # classes of construct: GNU-only spellings that a BSD tool rejects outright
+  # (`grep -P`, `readlink -f`, GNU `sed -i`, `stat -c`, `mktemp -p`), and tools
+  # that are simply absent from a runner service PATH — dell-foo's carries
+  # neither gawk nor diffutils, which is what broke the first self-heal
+  # revision. Comment lines are stripped first so prose naming a construct can
+  # neither satisfy nor break the assertion about the code.
+  probe_code="$(printf '%s\n' "$probe_block" | awk '!/^[[:space:]]*#/')"
+  for non_portable_construct in 'grep -P' 'readlink -f' 'sed -i' 'stat -c' 'stat -f' 'mktemp -p' 'awk ' 'cmp '; do
+    if printf '%s\n' "$probe_code" | grep -qF -e "$non_portable_construct"; then
+      fail "$probe_job uses '$non_portable_construct', which is GNU-only or absent from a self-hosted runner service PATH"
+    else
+      pass "$probe_job avoids the non-portable construct '$non_portable_construct'"
+    fi
+  done
+
 done
 
 setup_probe_block="$(extract_validate_job probe-setup-action-org-read)"
@@ -1191,6 +1236,95 @@ if echo "$auth_probe_block" | grep -qF 'runs-on: x86_64-linux'; then
 else
   fail "the self-hosted probe does not run on the x86_64-linux self-hosted runner"
 fi
+
+# --- The standalone auth action is proven on BOTH self-hosted platforms ---
+#
+# aarch64-darwin was the one platform where LFS over the token path had never
+# been proven: admins-mac-mini ran Determinate Nix 2.34.7, below the 2.35.0
+# floor, so it could not have passed the guard, let alone the LFS fetch. It now
+# runs upstream 2.35.1 under nix-darwin, so the gap is closable and closed. The
+# two probes are deliberate siblings — same structure, same proofs, same
+# hardening — and the assertions below are what keeps them siblings.
+
+self_hosted_auth_probe_labels=""
+for self_hosted_auth_probe in "${self_hosted_auth_probes[@]}"; do
+  self_hosted_auth_probe_job="${self_hosted_auth_probe%%:*}"
+  self_hosted_auth_probe_label="${self_hosted_auth_probe##*:}"
+  self_hosted_auth_probe_block="$(extract_validate_job "$self_hosted_auth_probe_job")"
+  # Read back the label the job actually declares, never the one expected, so
+  # the coverage check below sees the workflow rather than this suite's list.
+  self_hosted_auth_probe_declared_label="$(printf '%s\n' "$self_hosted_auth_probe_block" | awk '
+    index($0, "runs-on:") {
+      sub(/^[[:space:]]*runs-on:[[:space:]]*/, "")
+      print
+      exit
+    }
+  ')"
+
+  if [ "$self_hosted_auth_probe_declared_label" = "$self_hosted_auth_probe_label" ]; then
+    pass "$self_hosted_auth_probe_job runs on the self-hosted runner $self_hosted_auth_probe_label"
+  else
+    fail "$self_hosted_auth_probe_job runs on '$self_hosted_auth_probe_declared_label', expected the self-hosted runner $self_hosted_auth_probe_label"
+  fi
+
+  # The DEV-757 build_workstation_index shape is the standalone action WITHOUT
+  # the setup composite. A probe that reached for setup would not prove it.
+  if echo "$self_hosted_auth_probe_block" | grep -qF 'uses: ./auth'; then
+    pass "$self_hosted_auth_probe_job exercises the standalone auth action"
+  else
+    fail "$self_hosted_auth_probe_job does not exercise the standalone auth action"
+  fi
+
+  if echo "$self_hosted_auth_probe_block" | grep -qF 'uses: ./setup'; then
+    fail "$self_hosted_auth_probe_job uses the setup composite, so it does not prove the standalone path"
+  else
+    pass "$self_hosted_auth_probe_job never uses the setup composite"
+  fi
+
+  # actionlint rejects any runs-on label it does not know, so a self-hosted
+  # label that is not registered reds the lints job on every pull request —
+  # before a probe is ever dispatched.
+  if awk -v needle="- $self_hosted_auth_probe_declared_label" '
+    /^self-hosted-runner:/ { in_runner = 1; next }
+    in_runner && /^[a-zA-Z_]/ { in_runner = 0 }
+    in_runner && index($0, needle) { found = 1 }
+    END { exit !found }
+  ' "$ACTIONLINT_CONFIG"; then
+    pass "the self-hosted label $self_hosted_auth_probe_declared_label is registered in .github/actionlint.yaml"
+  else
+    fail "the self-hosted label $self_hosted_auth_probe_declared_label is not registered in .github/actionlint.yaml, so actionlint reds the lints job"
+  fi
+
+  self_hosted_auth_probe_labels="$self_hosted_auth_probe_labels$self_hosted_auth_probe_declared_label "
+done
+
+# Both self-hosted platforms, and both distinct: two probes pointed at the same
+# label would look like coverage and prove one platform twice.
+if [ "$self_hosted_auth_probe_labels" = "x86_64-linux macos-arm64-nix-darwin " ]; then
+  pass "the standalone auth action is proven on both self-hosted platforms, x86_64-linux and macos-arm64-nix-darwin"
+else
+  fail "the self-hosted auth probes cover '$self_hosted_auth_probe_labels', expected 'x86_64-linux macos-arm64-nix-darwin '"
+fi
+
+# Every self-hosted runner label in the workflow's default runner-map is proven
+# by one of these probes. A label with no probe is an unproven platform.
+while IFS= read -r default_runner_label; do
+  [ -n "$default_runner_label" ] || continue
+  case " $self_hosted_auth_probe_labels" in
+    *" $default_runner_label "*)
+      pass "the default runner-map label $default_runner_label is proven by a self-hosted auth probe"
+      ;;
+    *)
+      fail "the default runner-map label $default_runner_label has no self-hosted auth probe, so that platform is unproven"
+      ;;
+  esac
+done < <(awk '
+  index($0, "\"aarch64-darwin\":") || index($0, "\"x86_64-linux\":") {
+    sub(/^[^:]*:[[:space:]]*"/, "")
+    sub(/".*$/, "")
+    print
+  }
+' "$WORKFLOW" | sort -u)
 
 # The runner reads this while it prepares a JavaScript action, so a job-level or
 # step-level env is already too late: actions/create-github-app-token simply
@@ -1295,6 +1429,64 @@ if [ "$audited_names" -eq "${#probe_jobs[@]}" ]; then
   pass "the audit scans exactly the ${#probe_jobs[@]} probe jobs and nothing else"
 else
   fail "the audit scans $audited_names jobs, expected exactly ${#probe_jobs[@]}"
+fi
+
+audit_needs_count="$(echo "$audit_block" | awk '
+  /^[[:space:]]*needs:/ { in_needs = 1; next }
+  in_needs && /^[[:space:]]*-[[:space:]]/ { count++; next }
+  in_needs && /[^[:space:]]/ { in_needs = 0 }
+  END { print count + 0 }
+')"
+if [ "$audit_needs_count" -eq "${#probe_jobs[@]}" ]; then
+  pass "the audit waits for exactly the ${#probe_jobs[@]} probe jobs and nothing else"
+else
+  fail "the audit waits for $audit_needs_count jobs, expected exactly ${#probe_jobs[@]}"
+fi
+
+# --- Audit parity is discovered from the workflow, not from the list above ---
+#
+# The two assertions above compare the audit against this suite's hard-coded
+# probe list, so extending both together still passes while the workflow itself
+# has drifted. This one reads the probe jobs out of validate.yml instead: a
+# fourth probe added without folding its name into AUDITED_PROBE_JOBS makes the
+# audit fail closed at runtime on "no job matching an audited name", and one
+# added without folding it into needs: makes the audit read a log that may not
+# be flushed. Both are caught here rather than on a dispatch.
+
+declared_probe_jobs="$(list_validate_jobs | grep '^probe-' | grep -vx "$audit_job")"
+
+declared_probe_job_count=0
+while IFS= read -r declared_probe_job; do
+  [ -n "$declared_probe_job" ] || continue
+  declared_probe_job_count=$((declared_probe_job_count + 1))
+
+  if echo "$audit_block" | awk -v needle="$declared_probe_job" '
+    index($0, "AUDITED_PROBE_JOBS:") { in_list = 1; next }
+    in_list && !/^        [^ ]/ { in_list = 0 }
+    in_list && $1 == needle { found = 1 }
+    END { exit !found }
+  '; then
+    pass "every probe declared in validate.yml is in the audited-name list: $declared_probe_job"
+  else
+    fail "probe $declared_probe_job is declared in validate.yml but absent from AUDITED_PROBE_JOBS, so the audit fails closed on 'no job matching an audited name'"
+  fi
+
+  if echo "$audit_block" | awk -v needle="- $declared_probe_job" '
+    /^[[:space:]]*needs:/ { in_needs = 1; next }
+    in_needs && index($0, needle) { found = 1 }
+    in_needs && /^[[:space:]]*[a-zA-Z_]/ { in_needs = 0 }
+    END { exit !found }
+  '; then
+    pass "every probe declared in validate.yml is waited for by the audit: $declared_probe_job"
+  else
+    fail "probe $declared_probe_job is declared in validate.yml but absent from the audit's needs:, so its log may be unflushed when the audit reads it"
+  fi
+done <<< "$declared_probe_jobs"
+
+if [ "$declared_probe_job_count" -eq "${#probe_jobs[@]}" ]; then
+  pass "validate.yml declares exactly the ${#probe_jobs[@]} probe jobs this suite asserts on"
+else
+  fail "validate.yml declares $declared_probe_job_count probe jobs but this suite asserts on ${#probe_jobs[@]}"
 fi
 
 if echo "$audit_block" | grep -qF 'runs-on: ubuntu-latest'; then

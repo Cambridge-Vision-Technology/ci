@@ -8,8 +8,8 @@ on:
         description: |
           Run the manual, read-only organization-read probes. Off by default so an
           ordinary manual dispatch costs nothing extra. Needs the CI_FETCH_APP_ID and
-          CI_FETCH_APP_PRIVATE_KEY organization secrets and the self-hosted
-          x86_64-linux runner.
+          CI_FETCH_APP_PRIVATE_KEY organization secrets and both self-hosted runners,
+          x86_64-linux and macos-arm64-nix-darwin.
         type: boolean
         default: false
 
@@ -18,7 +18,9 @@ on:
 # step-level one is already too late. Without it
 # actions/create-github-app-token does not run on [self-hosted, Linux, X64],
 # which is the runner probe-auth-action-self-hosted-org-read uses. This is the
-# same requirement the README documents for consumers (DEV-757).
+# same requirement the README documents for consumers (DEV-757). The documented
+# requirement is Linux X64 specific, so the darwin probe does not need it; being
+# workflow-level it already covers that job too, at no cost.
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -195,9 +197,9 @@ jobs:
   # hard-coded 2.35.0 minimum-Nix guard fails the job outright below the floor,
   # which is the condition the A/B check would otherwise detect.
   #
-  # The two probes that CAN run steps do clear both the gitv3 and the fetcher
-  # cache and do make SSH unusable — including the self-hosted one, which is the
-  # only runner with a persistent cache to go stale.
+  # The three probes that CAN run steps do clear both the gitv3 and the fetcher
+  # cache and do make SSH unusable — including the two self-hosted ones, which
+  # are the only runners with a persistent cache to go stale.
   probe-reusable-workflow-org-read:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run-org-read-probes }}
     uses: ./.github/workflows/workflow.yml
@@ -546,6 +548,180 @@ jobs:
           rm -f "$listing" "$header"
           echo "Private Git-LFS objects fetched and smudged over the token path."
 
+  # Probe 4 — the standalone auth action on the self-hosted aarch64-darwin
+  # runner (admins-mac-mini, label macos-arm64-nix-darwin, Nix 2.35.1 upstream
+  # since the nix-darwin / nix-shared nix-pin migration removed Determinate).
+  # The deliberate sibling of probe 3: same structure, same proofs, same
+  # hardening, different platform. aarch64-darwin is the one platform where
+  # LFS-over-token was never proven, because this runner used to sit below the
+  # 2.35.0 floor and could not have passed the guard at all.
+  #
+  # Everything below runs on BSD userland, so every command is one that behaves
+  # identically on both: `sed -E`, `grep -qE`, `head -n`/`head -c`, `find -name`
+  # and `sort` are all POSIX or common to BSD and GNU. Nothing here uses
+  # `grep -P`, `readlink -f`, `sed -i`, `stat -c`, a `mktemp` flag or `awk` —
+  # the same discipline auth/authenticate.sh follows, because a self-hosted
+  # runner service runs with a curated PATH rather than a login shell's.
+  probe-auth-action-self-hosted-darwin-org-read:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run-org-read-probes }}
+    runs-on: macos-arm64-nix-darwin
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SSH_AUTH_SOCK: ""
+      GIT_SSH_COMMAND: "false"
+      PROBE_ORG: Cambridge-Vision-Technology
+    steps:
+      # This is the runner the cold cache actually matters on: it is persistent,
+      # so an earlier authenticated run leaves both the git cache and the
+      # fetcher cache warm, and every fetch below would be served from disk.
+      - name: Clear the Nix git and fetcher caches
+        run: |
+          set -euo pipefail
+          rm -rf "$HOME/.cache/nix/gitv3"
+          rm -rf "$HOME"/.cache/nix/fetcher-cache-v*
+
+      - uses: actions/checkout@v4
+
+      # Unlike the setup-composite probe, this runner already has Nix, so the
+      # credential-free A/B check runs BEFORE any credential exists at all.
+      - name: Isolate the Nix Git-LFS endpoint bug with a credential-free public repository
+        run: |
+          set -euo pipefail
+          # Apress/repo-with-large-file-storage is public, so no credential is
+          # involved, and its URL deliberately carries no `.git` suffix, which is
+          # exactly what triggers the malformed-endpoint defect.
+          #
+          # READ THE OUTCOMES CAREFULLY, because they are counter-intuitive:
+          #   HTTP 403 "exceeded its LFS budget" is the SUCCESS signal. Only a
+          #     real GitHub LFS API response can produce it, so endpoint
+          #     discovery worked. This is what Nix >= 2.35.0 does.
+          #   HTTP 422 is the FAILURE signal. Nix < 2.35.0 builds a malformed
+          #     endpoint and GitHub rejects it before it evaluates any
+          #     credential, so every private LFS result below would be
+          #     meaningless. This runner ran 2.34.7 under Determinate until the
+          #     nix-pin migration, so a 422 here means the host was reverted.
+          # Both are matched on the surrounding error phrase Nix prints, never
+          # on a bare three-digit number. This log carries store paths and URLs,
+          # and a store hash containing "403" with no "422" anywhere would
+          # otherwise be read as a FALSE GREEN. A phrase that fails to match
+          # falls through to the fail-closed branch at the end, which is a red.
+          #
+          # The isolation below is EXPLICIT, never subtractive. This check used
+          # to run under `env -u NIX_USER_CONF_FILES`, which did the opposite of
+          # what it claimed: unsetting that variable does not take Nix's user
+          # configuration out of scope, it makes Nix fall back to its DEFAULT
+          # user-config list, whose first entry is $HOME/.config/nix/nix.conf —
+          # exactly the file earlier revisions of this repository poisoned with
+          # `netrc-file = /tmp/netrc` on self-hosted runners. Nix then sent a
+          # stale token to a PUBLIC repository and was answered 401 Bad
+          # credentials, which is what broke this check on dell-foo.
+          # Pointing NIX_USER_CONF_FILES at an EMPTY file replaces that list
+          # instead of restoring it, and a command-line `--option` outranks
+          # every configuration file including the SYSTEM one, so neither the
+          # user's nix.conf nor /etc/nix/nix.conf can put a credential back.
+          empty_nix_conf="$RUNNER_TEMP/credential-free-nix.conf"
+          empty_netrc="$RUNNER_TEMP/credential-free-netrc"
+          : > "$empty_nix_conf"
+          : > "$empty_netrc"
+          ab_log="$RUNNER_TEMP/public-lfs-ab.log"
+          ab_status=0
+          NIX_USER_CONF_FILES="$empty_nix_conf" nix eval --impure --raw \
+            --option netrc-file "$empty_netrc" \
+            --option access-tokens "" \
+            --extra-experimental-features "nix-command flakes" \
+            --expr '(builtins.fetchGit { url = "https://github.com/Apress/repo-with-large-file-storage"; ref = "master"; lfs = true; }).outPath' \
+            > "$ab_log" 2>&1 || ab_status=$?
+          sed -E 's/(gh[psu]_|github_pat_)[A-Za-z0-9_]+/[redacted]/g' "$ab_log"
+          if [ "$ab_status" -eq 0 ]; then
+            echo "The public Git-LFS fetch succeeded outright, so endpoint discovery works on this Nix."
+            exit 0
+          fi
+          if grep -qE 'HTTP error 422' "$ab_log"; then
+            echo "::error::HTTP 422 from the public Git-LFS endpoint: this Nix builds a malformed endpoint and is below 2.35.0. Treat every private Git-LFS result in this run as meaningless."
+            exit 1
+          fi
+          # A credential-free request cannot be rejected for its credential. If
+          # this fires, some host state still reached Nix and the isolation
+          # above needs fixing before any result in this run means anything.
+          if grep -qE 'HTTP error 401|Bad credentials' "$ab_log"; then
+            echo "::error::401 Bad credentials from a check that carries no credential: host state reached Nix despite the empty user configuration and the explicit netrc-file override. This is not an endpoint-discovery result."
+            exit 1
+          fi
+          if grep -qE 'HTTP error 403|exceeded its LFS budget' "$ab_log"; then
+            echo "HTTP 403 (LFS budget exceeded) is the expected SUCCESS signal: a real GitHub LFS API response proves endpoint discovery worked."
+            exit 0
+          fi
+          echo "::error::The public Git-LFS A/B check produced neither a 'HTTP error 403' / 'exceeded its LFS budget' success phrase nor a 'HTTP error 422' failure phrase, so it cannot isolate the endpoint defect from authentication."
+          exit 1
+
+      - uses: ./auth
+        with:
+          enable-org-read-access: "true"
+          github-app-id: ${{ secrets.CI_FETCH_APP_ID }}
+          github-app-private-key: ${{ secrets.CI_FETCH_APP_PRIVATE_KEY }}
+
+      - name: Verify no SSH credential is available to this probe
+        run: |
+          set -euo pipefail
+          test -z "${SSH_AUTH_SOCK:-}"
+          test "$GIT_SSH_COMMAND" = "false"
+          test ! -e "$HOME/.ssh/id_rsa"
+          test ! -e "$HOME/.ssh/id_ed25519"
+          echo "No agent socket and no usable ssh transport: every fetch below has to go over HTTPS with the App token."
+
+      - name: Clone private infra-base over HTTPS with App credentials only
+        run: |
+          set -euo pipefail
+          clone_dir="$RUNNER_TEMP/probe-infra-base"
+          rm -rf "$clone_dir"
+          git clone --depth 1 "https://github.com/$PROBE_ORG/infra-base" "$clone_dir"
+          test -f "$clone_dir/flake.nix"
+          rm -rf "$clone_dir"
+          echo "Private infra-base cloned over HTTPS."
+
+      - name: Resolve private nix-shared through its git+ssh flake URL
+        run: |
+          set -euo pipefail
+          # Nix strips the git+ prefix and hands git a plain
+          # ssh://git@github.com/… URL, which is the one load-bearing insteadOf
+          # form. With no SSH key in the job, resolving this at all proves the
+          # rewrite reaches Nix's flake fetcher.
+          metadata="$RUNNER_TEMP/probe-nix-shared-metadata.json"
+          nix flake metadata --json \
+            --extra-experimental-features "nix-command flakes" \
+            "git+ssh://git@github.com/$PROBE_ORG/nix-shared" > "$metadata"
+          grep -q '"revision"' "$metadata"
+          rm -f "$metadata"
+          echo "Private nix-shared resolved through its git+ssh:// flake URL."
+
+      - name: Fetch a private Git-LFS-bearing input over the token path
+        run: |
+          set -euo pipefail
+          # Nix implements the Git-LFS protocol itself, so the credential helper
+          # and http.extraHeader do not reach it. It reads the remote through
+          # libgit2, which applies insteadOf, so this fetch takes the HTTPS
+          # branch and authenticates from netrc-file. This is the aarch64-darwin
+          # proof: the one platform where the token path had never served LFS.
+          store_path="$(nix eval --impure --raw \
+            --extra-experimental-features "nix-command flakes" \
+            --expr '(builtins.fetchGit { url = "ssh://git@github.com/'"$PROBE_ORG"'/purescript-dedup"; ref = "main"; lfs = true; }).outPath')"
+          listing="$RUNNER_TEMP/probe-lfs-files.txt"
+          find "$store_path" -type f -name '*.zstd' | sort > "$listing"
+          test -s "$listing"
+          lfs_file="$(head -n 1 "$listing")"
+          header="$RUNNER_TEMP/probe-lfs-header"
+          head -c 100 "$lfs_file" > "$header"
+          if grep -q 'git-lfs.github.com/spec/v1' "$header"; then
+            echo "::error::$lfs_file is an unsmudged Git-LFS pointer, so the LFS objects were never fetched."
+            rm -f "$listing" "$header"
+            exit 1
+          fi
+          rm -f "$listing" "$header"
+          echo "Private Git-LFS objects fetched and smudged over the token path."
+
   # The probe log credential audit — a SEPARATE job, for two reasons that are
   # both fatal to the in-job version this replaces.
   #
@@ -580,6 +756,7 @@ jobs:
       - probe-reusable-workflow-org-read
       - probe-setup-action-org-read
       - probe-auth-action-self-hosted-org-read
+      - probe-auth-action-self-hosted-darwin-org-read
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -593,6 +770,7 @@ jobs:
         probe-reusable-workflow-org-read
         probe-setup-action-org-read
         probe-auth-action-self-hosted-org-read
+        probe-auth-action-self-hosted-darwin-org-read
     steps:
       - name: Audit every probe job log for credential material
         run: |

@@ -4,6 +4,10 @@ self-hosted-runner:
     # default runner-map in workflow.yml and by the self-hosted manual probe in
     # validate.yml.
     - x86_64-linux
+    # admins-mac-mini. The organization's self-hosted darwin runner label, used
+    # by the default runner-map in workflow.yml and by the self-hosted darwin
+    # manual probe in validate.yml.
+    - macos-arm64-nix-darwin
 
 paths:
   "**/workflow.yml":
