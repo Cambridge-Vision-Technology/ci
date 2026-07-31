@@ -420,6 +420,116 @@ else
   fail "GitHub App token is not downscoped to contents: read"
 fi
 
+# --- Optional repository scoping narrows the capability, and nothing else ---
+#
+# enable-org-read-access grants read access to every repository in the
+# organization. A caller whose private dependencies are a known, fixed list
+# should be able to say so without abandoning this workflow for a hand-rolled
+# job, so org-read-repositories confines the minted token to a named list.
+#
+# It is a PURE ADDITION. The App token action splits `repositories` on commas
+# and newlines and drops empty entries, so the empty default leaves it with no
+# repository at all, and an `owner` with no repositories is exactly its
+# whole-organization case. An unset input therefore mints precisely the token
+# this workflow has always minted — which matters more here than on the
+# composites, because roughly 27 repositories consume this workflow at @main.
+#
+# The name is scope-shaped, never mechanism-shaped. Octo STS trust policies
+# carry a `repositories` field just as an App installation token does, so the
+# input survives the move off App secrets (DEV-753) without a second
+# organization-wide sweep of call sites.
+
+extract_workflow_input() {
+  awk -v key="      $1:" '
+    $0 == key { in_input = 1; next }
+    in_input && /^      [a-zA-Z]/ { exit }
+    in_input { print }
+  ' "$WORKFLOW"
+}
+
+if grep -qE '^      org-read-repositories:' "$WORKFLOW"; then
+  pass "the workflow exposes the optional repository scope input org-read-repositories"
+else
+  fail "the workflow does not expose org-read-repositories, so a caller cannot narrow below organization-wide"
+fi
+
+scope_input_block="$(extract_workflow_input org-read-repositories)"
+scope_description="$(printf '%s\n' "$scope_input_block" | tr '\n' ' ' | tr -s ' ')"
+
+if printf '%s\n' "$scope_input_block" | grep -qE '^[[:space:]]+required: false[[:space:]]*$'; then
+  pass "org-read-repositories stays optional on the workflow"
+else
+  fail "org-read-repositories is not optional on the workflow, so every existing call site would have to pass it"
+fi
+
+if printf '%s\n' "$scope_input_block" | grep -qE '^[[:space:]]+default: ""[[:space:]]*$'; then
+  pass "org-read-repositories defaults to empty, which is the organization-wide token this workflow mints today"
+else
+  fail "org-read-repositories does not default to empty, so it would change the behaviour of existing callers"
+fi
+
+# A list of names is a string, not a boolean. A workflow_call input with the
+# wrong type is a startup failure at every call site that sets it.
+if printf '%s\n' "$scope_input_block" | grep -qE '^[[:space:]]+type: string[[:space:]]*$'; then
+  pass "org-read-repositories is declared as a string, matching the list the App token action parses"
+else
+  fail "org-read-repositories is not declared type: string"
+fi
+
+if [[ "$scope_description" == *"every repository in this organization"* ]]; then
+  pass "the workflow documents that the empty default of org-read-repositories is organization-wide"
+else
+  fail "the workflow does not document what the empty default of org-read-repositories means"
+fi
+
+if echo "$app_token_block" | grep -qF 'repositories: ${{ inputs.org-read-repositories }}'; then
+  pass "the workflow wires org-read-repositories to create-github-app-token's repositories input"
+else
+  fail "the workflow declares org-read-repositories but never wires it to create-github-app-token's repositories input"
+fi
+
+workflow_scope_wirings="$(count_occurrences 'repositories: ${{ inputs.org-read-repositories }}' "$WORKFLOW")"
+if [ "$workflow_scope_wirings" -eq 1 ]; then
+  pass "org-read-repositories is wired exactly once in the workflow"
+else
+  fail "the workflow wires org-read-repositories $workflow_scope_wirings times, expected exactly 1"
+fi
+
+# A fallback expression is the one edit that would silently narrow the default
+# path: `${{ inputs.org-read-repositories || github.repository }}` looks
+# harmless and confines every existing caller to its own repository.
+workflow_scope_fallbacks="$(awk '/^[[:space:]]*#/ { next } index($0, "repositories: ${{") && index($0, "||") { count++ } END { print count + 0 }' "$WORKFLOW")"
+if [ "$workflow_scope_fallbacks" -eq 0 ]; then
+  pass "the repository scope carries no fallback expression, so an unset input stays empty"
+else
+  fail "the workflow has $workflow_scope_fallbacks fallback expressions on the repositories input, which would narrow the default path"
+fi
+
+workflow_mint_owner_line="$(echo "$app_token_block" | awk 'index($0, "owner:") { sub(/^[[:space:]]*/, ""); print; exit }')"
+if [ "$workflow_mint_owner_line" = 'owner: ${{ github.repository_owner }}' ]; then
+  pass "the workflow still mints against the whole owner installation, unconditionally"
+else
+  fail "the workflow mints with owner line '$workflow_mint_owner_line', expected the unconditional repository owner"
+fi
+
+# Setting only the scope must mint nothing: the capability input and its
+# deprecated alias alone decide whether a token exists, and the scope decides
+# only how wide it is.
+workflow_mint_gate_line="$(echo "$app_token_block" | awk 'index($0, "if:") { sub(/^[[:space:]]*/, ""); print; exit }')"
+if [ "$workflow_mint_gate_line" = 'if: ${{ inputs.enable-org-read-access || inputs.enable-github-app-auth }}' ]; then
+  pass "the mint gate is unchanged: only the capability input and its deprecated alias decide whether a token is minted"
+else
+  fail "the mint gate is '$workflow_mint_gate_line', expected the capability input and its deprecated alias alone"
+fi
+
+for mechanism_named_scope_input in github-app-repositories app-repositories token-repositories installation-repositories; do
+  if grep -qF "$mechanism_named_scope_input" "$WORKFLOW"; then
+    fail "the workflow names the repository scope after the mechanism: $mechanism_named_scope_input"
+  else
+    pass "the workflow carries no mechanism-named repository scope input: $mechanism_named_scope_input"
+  fi
+done
+
 # --- Credential acquisition is delegated to the single shared script ---
 
 delegation_block="$(extract_named_build_step 'Check out shared authentication implementation')"
@@ -941,6 +1051,22 @@ for ordinary_job in lints ci setup-composite-smoke; do
     pass "ordinary validation job $ordinary_job is not gated on the probe opt-in"
   fi
 done
+
+# The probes are the only live evidence that organization read access works, and
+# the organization-wide default is the path every existing consumer takes, so no
+# probe may narrow the scope. One that passed org-read-repositories would prove a
+# narrowed token and leave the default unproven.
+scoped_probe_jobs=""
+for probe_job in "${probe_jobs[@]}"; do
+  if extract_validate_job "$probe_job" | grep -qF 'org-read-repositories'; then
+    scoped_probe_jobs="$scoped_probe_jobs$probe_job "
+  fi
+done
+if [ -z "$scoped_probe_jobs" ]; then
+  pass "every probe exercises the organization-wide default scope, so the probe evidence covers the path existing consumers take"
+else
+  fail "probes '$scoped_probe_jobs' narrow the repository scope, so the organization-wide default path is unproven"
+fi
 
 # --- The reusable-workflow probe ---
 

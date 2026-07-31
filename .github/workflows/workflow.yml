@@ -19,6 +19,12 @@ on:
         required: false
         default: false
         type: boolean
+      org-read-repositories:
+        description: |
+          Optional narrowing of `enable-org-read-access`. Comma- or newline-separated repository names, either `repository` or `owner/repository` where the owner has to be this organization. Empty — the default — grants read access to every repository in this organization, which is what this workflow has always done. Narrow it when the job's private dependencies are a known, fixed list; leave it empty when they are not, as a flake whose inputs may change is.
+        required: false
+        default: ""
+        type: string
       visibility:
         description: "[DEPRECATED] No longer used. Will be removed in a future version."
         required: false
@@ -180,6 +186,16 @@ jobs:
         with:
           lfs: ${{ inputs.enable-lfs }}
           fetch-depth: 0 # Full clone for LFS compatibility
+      # The token stays owner-wide unless the caller narrows it. The action
+      # splits `repositories` on commas and newlines and drops empty entries, so
+      # the empty default leaves it with no repository at all, and an `owner`
+      # with no repositories is precisely its whole-organization case. Passing
+      # the input unconditionally is therefore identical to omitting the line,
+      # and there is deliberately no fallback expression here: a `||` would
+      # silently narrow the default path to one repository. This workflow
+      # resolves whatever private flake inputs the consumer's flake declares, so
+      # a narrowed list is only ever correct when the consumer knows that list;
+      # the empty default is what keeps every existing caller working.
       - name: Mint GitHub App organization installation token
         id: github-app-token
         if: ${{ inputs.enable-org-read-access || inputs.enable-github-app-auth }}
@@ -188,6 +204,7 @@ jobs:
           app-id: ${{ secrets.github-app-id }}
           private-key: ${{ secrets.github-app-private-key }}
           owner: ${{ github.repository_owner }}
+          repositories: ${{ inputs.org-read-repositories }}
           permission-contents: read
       # job.workflow_repository / job.workflow_sha identify this repository at
       # the revision the caller selected, with no hard-coded repository and with
