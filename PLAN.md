@@ -4,13 +4,13 @@ Linear: https://linear.app/aykua/issue/DEV-759/ci-own-ci-credential-acquisition-
 
 ## CURRENT STATUS
 
-pr_implementation_status: IN_PROGRESS — CHUNKS 1.1, 1.2, 1.3, 1.4 and 1.5 complete, including the 2026-07-30 credential-audit redesign and the 2026-07-31 legacy-artifact self-heal; all gates green (490 assertions, prettier, actionlint, `nix flake check`, pull-request checks, and a manual probe dispatch in which ALL THREE probes and the credential audit passed). PR #23 remains a DRAFT awaiting review
+pr_implementation_status: COMPLETE — PHASE 0 fully complete (CHUNKS 0.1 and 0.2) and PHASE 1 complete (CHUNKS 1.1 through 1.5), including the 2026-07-30 credential-audit redesign and the 2026-07-31 legacy-artifact self-heal; all gates green (490 assertions, prettier, actionlint, `nix flake check`, pull-request checks, and a manual probe dispatch in which ALL THREE probes and the credential audit passed). PR #23 remains a DRAFT awaiting human review and MUST STAY DRAFT
 live_acceptance_status: NOT_APPLICABLE
 current_phase: PHASE 1
 current_chunk: CHUNK 1.5
 valid_phases: PHASE 0, PHASE 1
-next_pr_action: Review. Both GitHub-side gates are closed on head `03d657e` — pull-request checks all green (run 30610386952), and manual probe dispatch 30610388212 green on all three probes plus `probe-log-credential-audit`. MERGE IS TIME-SENSITIVE: every consumer still on `ci@main` keeps re-writing the five credential artifacts onto self-hosted runners, and the artifacts were observed being recreated on dell-foo twice within one hour on 2026-07-31 by jobs this workstream did not launch. The leak stops only when this lands on `main`
-next_post_merge_action: none
+next_pr_action: HUMAN TAKEOVER. The PR is ready for a human to review and land; it must remain a DRAFT until a human undrafts it. No agent work remains. Both GitHub-side gates are closed on head `03d657e` — pull-request checks all green (run 30610386952), and manual probe dispatch 30610388212 green on all three probes plus `probe-log-credential-audit`. THE MERGE BLOCKER IS CLEARED: the CHUNK 1.2 minimum-Nix guard was the only blocker, and `macos-arm64-nix-darwin` now passes it (CHUNK 0.2 landed on the host 2026-07-31). No darwin consumer will be red on merge. Merging remains time-sensitive for the credential leak — every consumer still on `ci@main` keeps re-writing the five credential artifacts onto self-hosted runners, observed live on BOTH dell-foo and admins-mac-mini on 2026-07-31 by jobs this workstream did not launch. The leak stops only when this lands on `main`
+next_post_merge_action: Merge `ci-runner-mac` PR #17. See the CAVEAT in CHUNK 0.2 — the mac is deployed from an unmerged branch and a deploy-rs push from `main` would revert it to Determinate and re-break the guard
 
 ## DELIVERABLES
 
@@ -57,14 +57,16 @@ A reviewer can verify completion as follows:
 ### Runner fleet (live-verified)
 
 - `dell-foo` (100.103.224.23), label `x86_64-linux`: now Nix 2.35.1 (was 2.34.7) since CHUNK 0.1; upstream, NixOS 25.05, no Determinate. Owned by `dev-infra` (/Volumes/Git/dev-infra/main); label in `services/runner.nix`, host in `hosts/physical/dell-foo/default.nix`. Version is pinned by the `nix-pin` module in `nix-shared`, not by this host.
-- `admins-mac-mini` (100.83.22.123), label `macos-arm64-nix-darwin`: Nix 2.34.7 via Determinate Nix 3.21.2. Owned by `ci-runner-mac` (/Volumes/Git/ci-runner-mac). `modules/base.nix` sets `nix.enable = false`; Nix is installed imperatively and unpinned by `deploy.sh` via install.determinate.systems.
-- Determinate Nix has no 2.35-based release. Latest 3.21.7/3.21.8 are still upstream 2.34.8.
+- `admins-mac-mini` (100.83.22.123), label `macos-arm64-nix-darwin`: now Nix 2.35.1 (was 2.34.7 via Determinate Nix 3.21.2) since CHUNK 0.2, verified on the host 2026-07-31. `nix --version` reports `nix (Nix) 2.35.1` — upstream form, no Determinate wrapper. `determinate-nixd` is ABSENT and `/nix/determinate` and `/nix/var/determinate/` are gone. Owned by `ci-runner-mac` (/Volumes/Git/ci-runner-mac), now `nix.enable = true` under nix-darwin, pinned by the SAME `nix-shared` `nix-pin` module as dell-foo.
+- Determinate Nix has no 2.35-based release. Latest 3.21.7/3.21.8 are still upstream 2.34.8. Moot for our fleet as of CHUNK 0.2 — no runner runs Determinate any more.
 - The GCP `runner-1`..`runner-4` fleet has been offline 29-46 days and a `retire-gcp-fleet` branch exists in dev-infra. Treat as retired.
 - GitHub-hosted runners already receive Nix 2.35.1 through the `cachix/install-nix-action` v31.11.0 pin already present in `workflow.yml` and `setup/action.yml`. No change is needed in this repository for them.
 - `workflow.yml` skips Nix installation when Nix is already present (the `Detect existing Nix` step), so CI never upgrades a self-hosted runner. Each runner's own configuration repository is the only lever.
 - Both runners currently have empty `access-tokens`.
-- CORRECTED 2026-07-31, checked on the host. dell-foo has NO system netrc at all: `/etc/nix/netrc` DOES NOT EXIST, and nothing in `/etc/nix/nix.conf` or any NixOS module sets `netrc-file`. The earlier entry here claiming a system `netrc-file = /etc/nix/netrc` on dell-foo was wrong, and the CHUNK 1.5 diagnosis built on it was wrong with it. The mac's Determinate-managed `/nix/var/determinate/netrc` is real and unaffected by this correction.
+- CORRECTED 2026-07-31, checked on the host. dell-foo has NO system netrc at all: `/etc/nix/netrc` DOES NOT EXIST, and nothing in `/etc/nix/nix.conf` or any NixOS module sets `netrc-file`. The earlier entry here claiming a system `netrc-file = /etc/nix/netrc` on dell-foo was wrong, and the CHUNK 1.5 diagnosis built on it was wrong with it.
+- SUPERSEDED 2026-07-31 by CHUNK 0.2: NEITHER runner has a system netrc now. The mac's `/nix/var/determinate/netrc` was Determinate's and left with Determinate. `git grep -i netrc` over `ci-runner-mac` returns nothing on either branch — the host never had a repo-managed netrc. Attic cache auth there uses a sops secret (`config.sops.secrets.attic_token`), not netrc; FlakeHub is not a substituter on that host.
 - What actually held the stale credential on dell-foo was this repository's own leftovers in the RUNNER USER's home — `$HOME/.netrc`, `$HOME/.git-credentials`, a global `credential.helper`, and `netrc-file = /tmp/netrc` in the USER `nix.conf` — not any machine-owner or system state. See the SECURITY entry under "Defects in the pre-CHUNK-1.1 `workflow.yml`".
+- CONFIRMED 2026-07-31: `admins-mac-mini` carries the SAME five legacy artifacts, in the runner HOME `/opt/github-runner/admin-mac-mini` — NOT the passwd HOME `/var/lib/github-runner`. Same distinct-work-dir trap as dell-foo; look in the runner's work directory, not the account home.
 
 ### The SSH path is dead organization-wide (live-verified 2026-07-29)
 
@@ -92,12 +94,13 @@ A reviewer can verify completion as follows:
 ### Defects in the pre-CHUNK-1.1 `workflow.yml` — all fixed by CHUNK 1.1, kept as the regression list
 
 - Three redundant credential mechanisms are written (`~/.netrc`, `~/.git-credentials`, `credential.helper store`) where one suffices.
-- `netrc-file` is set in the user `nix.conf`, which clobbers Determinate's system `netrc-file` because the setting is scalar and user config wins. This breaks FlakeHub and cache auth on the mac runner. Use `nix.custom.conf` and additive settings, and never override a Determinate-managed value.
+- `netrc-file` is set in the user `nix.conf`, which clobbers any system `netrc-file` because the setting is scalar and user config wins. Historically that broke FlakeHub and cache auth on the Determinate-managed mac runner; since CHUNK 0.2 no runner has a system netrc, so the clobber has no victim left. The rule stands anyway — use additive settings and never override a machine-owner value.
 - The fixed path `/tmp/netrc` lets concurrent jobs on self-hosted runners clobber each other, and credential files are never cleaned up, so tokens outlive the job. Use `$RUNNER_TEMP` and clean up.
 - SECURITY, CONFIRMED LIVE 2026-07-31 on dell-foo. That last item is not theoretical and is not merely hygiene. `origin/main`'s `setup/action.yml` and `workflow.yml` wrote FIVE credential artifacts and removed NONE of them: `$HOME/.netrc`, `/tmp/netrc`, `$HOME/.git-credentials`, a GLOBAL `credential.helper store` bound to that file, and `netrc-file = /tmp/netrc` in the user `nix.conf`. On a self-hosted runner `$HOME` and `/tmp` persist between jobs, so a plaintext `ghs_` App installation token sat in the runner user's home directory long after the job that minted it ended. It has since expired — installation tokens live one hour — so this is a disclosed-and-dead credential, not a live one, but the exposure window was real and unbounded by anything except the token's own lifetime.
 - DELIVERABLE 8's "the private key and token are not printed or uploaded" was therefore effectively VIOLATED on self-hosted runners by the pre-CHUNK-1.1 code. Not through the logs, which were clean, and not through artifacts, which were never uploaded — through persistent on-disk state on a shared machine, which the deliverable's wording did not anticipate. Read deliverable 8 as covering on-disk residue as well; CHUNK 1.1's self-heal is what makes it true.
 - Second-order consequence, and the reason a stale token is worse than a merely untidy one: the leftover `netrc-file` and global credential helper are read by EVERY later job on that runner, including jobs that ask for no organization access at all. Those jobs then send an expired token where they would otherwise have sent nothing, and GitHub answers `401 Bad credentials` — even for a PUBLIC repository, which is otherwise unauthenticated. A dead credential is not inert; it converts anonymous success into authenticated failure.
 - ONGOING, and the reason merging is time-sensitive: this is not a one-off residue to be cleaned once. Every consumer still calling `ci@main` re-writes all five artifacts on every self-hosted run. On dell-foo on 2026-07-31 the HOME artifacts were observed freshly written, and `/tmp/netrc` was observed absent and then present again roughly ten minutes later, by jobs this workstream did not launch. Until this lands on `main`, each such job re-arms the leak with a live one-hour token. The self-heal cleans a runner only as of the last job that ran the NEW script on it.
+- CONFIRMED ON BOTH RUNNERS 2026-07-31. `admins-mac-mini` carries all five artifacts too, under the runner HOME `/opt/github-runner/admin-mac-mini`, and they were likewise observed being actively rewritten by in-flight jobs running `origin/main`'s old code. They match CHUNK 1.1's exact-shape removal criteria, and `/tmp/netrc` there is runner-owned, so the self-heal removes every one of them on the first run of the new script. NO host access is needed for the mac either.
 - `enable-ssh-agent` and `enable-github-app-auth` are mutually destructive: the rewrite is installed before ssh-agent starts, and it breaks LFS as described above.
 - `setup/action.yml` has no `insteadOf` rewrite and no stale-rewrite cleanup. It has drifted from `workflow.yml` on the one mechanism that matters.
 - No `access-tokens` are set when Nix is pre-installed, so `github:` refs hit the 60/hr anonymous API limit on self-hosted runners.
@@ -145,8 +148,9 @@ A reviewer can verify completion as follows:
 ### External dependencies (handled by the user, not chunks here)
 
 - Rotating a leaked PAT in the workstation `nix.conf`.
-- Re-authenticating the mac runner's expired Determinate token.
-- Fixing the stale `mac-mini-ts` SSH alias, which currently breaks the mac deploy path.
+- MOOT since CHUNK 0.2: ~~Re-authenticating the mac runner's expired Determinate token.~~ Determinate is gone from the host.
+- RESOLVED in practice: the mac deploy path worked — CHUNK 0.2 was delivered by a deploy-rs push to `admins-mac-mini`. The `mac-mini-ts` SSH alias is no longer blocking.
+- OUTSTANDING: merge `ci-runner-mac` PR #17. Until then the mac runs an unmerged branch and a `main` deploy reverts it. See the CHUNK 0.2 CAVEAT.
 
 ### Known defect outside this ticket (not a chunk; needs its own ticket)
 
@@ -158,13 +162,13 @@ A reviewer can verify completion as follows:
 
 Recorded, not decided. Do not act on these without live evidence.
 
-- Does adding a `.git` suffix to LFS flake input URLs make the endpoint well-formed on Nix < 2.35.0? If it does, the mac runner is unblocked with no Nix upgrade at all, which would change the CHUNK 0.2 calculus entirely. Source-traced but NOT empirically verified. The credential-free public-repository repro in CHUNK 1.4 is consistent with it, because that URL deliberately lacks the suffix.
+- Does adding a `.git` suffix to LFS flake input URLs make the endpoint well-formed on Nix < 2.35.0? OVERTAKEN BY EVENTS as far as this ticket is concerned — CHUNK 0.2 upgraded the mac, so no runner is below the floor and nothing depends on the answer. Retained only as a possible fallback for a future sub-floor host. Source-traced but NOT empirically verified. The credential-free public-repository repro in CHUNK 1.4 is consistent with it, because that URL deliberately lacks the suffix.
 
-## PHASE 0 — Raise all CI runners to Nix >= 2.35.0 — CHUNK 0.1 COMPLETE, CHUNK 0.2 URGENT
+## PHASE 0 — Raise all CI runners to Nix >= 2.35.0 — COMPLETE (CHUNKS 0.1 AND 0.2)
 
-Prerequisite for everything in PHASE 1. Without it the uniform HTTPS token path cannot serve LFS. Work happens in external repositories, each on its own branch with its own PR.
+Prerequisite for everything in PHASE 1. Without it the uniform HTTPS token path cannot serve LFS. Work happened in external repositories, each on its own branch with its own PR.
 
-CHUNK 0.1 is delivered, so `x86_64-linux` (dell-foo, Nix 2.35.1) is the only self-hosted runner meeting the floor. CHUNK 0.2 was deferred but is now urgent: the CHUNK 1.2 guard is enforced on darwin, so `admins-mac-mini` is red until it lands. PHASE 1 proceeds on that basis.
+BOTH self-hosted runners now meet the floor: `x86_64-linux` (dell-foo) and `macos-arm64-nix-darwin` (admins-mac-mini), both on Nix 2.35.1. The CHUNK 1.2 guard passes on both, so no consumer is red on merge.
 
 ### CHUNK 0.1 — dell-foo to Nix >= 2.35.0 — COMPLETE
 
@@ -172,53 +176,51 @@ Delivered externally and in parallel, not by this workstream.
 
 - `dell-foo` is live on Nix 2.35.1, verified on the host. System generation 13, 2026-07-29.
 - Delivered by `nix-shared` PR #38 (merged, commit `ef576c6`), which changed `modules/nix-pin.nix` to pin `nixVersions.nix_2_35` from a dedicated `nixpkgs-nix` flake input, plus `dev-infra` PR #159 (merged, commit `bb7da39`), which bumped the `nix-shared` input.
-- KEY FACT for future work: the fleet-wide lever for Nix version is the `nix-pin` NixOS module in `nix-shared`, not per-host `nix.package`. `dell-foo` is currently the only `nix-pin` consumer.
+- KEY FACT for future work: the fleet-wide lever for Nix version is the `nix-pin` module in `nix-shared`, not per-host `nix.package`. CORRECTED 2026-07-31 — `dell-foo` is NO LONGER the only `nix-pin` consumer. CHUNK 0.2 put `admins-mac-mini` on the same lever via `darwinModules.nix-pin`, so there are now two consumers, one NixOS and one darwin.
 - `nixos-unstable`'s default `pkgs.nix` was still 2.34.8, so the `nixVersions.nix_2_35` attribute must be named explicitly. A plain `pkgs.nix` silently stays below the floor.
 - `nix-shared` PR #38 also added `darwin-nix-pin` and `nixos-nix-pin` checks, because nixpkgs drops old `nixVersions.nix_2_*` attributes as a series ages out, so a future input bump could otherwise silently evaluate the pin away. New self-hosted hosts inherit the 2.35 floor by construction.
 - The runner label `x86_64-linux` is unchanged and the runner is online.
 
-### CHUNK 0.2 — admins-mac-mini to Nix >= 2.35.0 — URGENT (darwin consumers are red until it lands)
+### CHUNK 0.2 — admins-mac-mini to Nix >= 2.35.0 — COMPLETE
 
-No longer merely deferred. The CHUNK 1.2 guard now enforces the 2.35.0 floor on darwin, so every job on `admins-mac-mini` (Nix 2.34.7) fails until this chunk lands. Deliberate forcing function, user decision.
+Delivered externally, not by this workstream. The chosen option was the Determinate-to-upstream migration, not waiting for a Determinate 2.35 release.
 
-Original deferral reasons, retained because they still describe the cost:
+LIVE-VERIFIED ON THE HOST 2026-07-31:
 
-- Determinate Nix has no 2.35-based release and no published timeline. Waiting has no known end date.
-- `ci-runner-mac` sets `nix.enable = false`, so the `nix-pin` module in `nix-shared` — the fleet-wide lever used for `dell-foo` in CHUNK 0.1 — does not reach the mac while it stays on Determinate.
-- The alternative is a Determinate-to-upstream migration, which is a larger change than this ticket should absorb now.
+- `nix --version` reports `nix (Nix) 2.35.1` — the upstream form, with no Determinate wrapper in the string.
+- `determinate-nixd` is ABSENT; `/nix/determinate` and `/nix/var/determinate/` are gone.
+- Nix is now managed by nix-darwin via `nix-shared`'s `darwinModules.nix-pin` — the SAME fleet-wide lever used for dell-foo in CHUNK 0.1. See the corrected KEY FACT under CHUNK 0.1: there are now two `nix-pin` consumers, not one.
+- The runner is online and registered, label `macos-arm64-nix-darwin` unchanged, and a post-migration `ci / build (aarch64-darwin)` job has already succeeded.
+- The CHUNK 1.2 guard was executed ON the host using the runner SERVICE's own PATH, not a login shell's: exit 0, "meets the required minimum 2.35.0".
 
-Consequences to carry forward:
+Delivered by `ci-runner-mac` commit `029a869` "feat(nix): migrate to upstream nix 2.35 via nix-shared nix-pin", which sets `nix.enable = true`, moves every `nix.custom.conf` setting to `nix.settings.*`, and adds a `nix-upstream` check asserting nix >= 2.35.
 
-- `aarch64-darwin` LFS-over-token is unproven. No PHASE 1 probe covers it.
-- USER DECISION (overrides all earlier text): darwin is NOT exempt from the CHUNK 1.2 guard. The guard is enforced on darwin now, so `admins-mac-mini` on Nix 2.34.7 WILL fail its jobs until this chunk lands. This is a deliberate forcing function chosen by the user, not an oversight.
-- This repository's own PR CI is unaffected: `validate.yml` uses `macos-latest`, which gets Nix 2.35.1 from the pinned `cachix/install-nix-action` v31.11.0.
-- The `.git`-suffix question in OPEN QUESTIONS could remove the need for this chunk entirely. Answer it before designing a Determinate-to-upstream migration.
+CAVEAT — READ BEFORE TOUCHING THE MAC. `ci-runner-mac` PR #17 is OPEN, NOT MERGED. The host was deployed from the branch `dev/nix-upstream-migration` via deploy-rs push, so the running system does not correspond to any commit on `main`. A deploy-rs push from `main` would REVERT the mac to Determinate Nix 2.34.7 and re-break the CHUNK 1.2 guard, reddening every darwin job. PR #17 should be merged. Until it is, the green state here is branch-deployed and reversible by any routine `main` deploy.
 
-Prior art for whoever picks this up — CORRECTED 2026-07-29, it is in `nix-shared`, NOT `mac-workstation`:
+Consequences and corrections:
 
-- `nix-shared` `scripts/migrate-to-upstream.sh` (PR #36, merged 2026-07-13, commit `41de888`), described as proven on James's laptop.
-- `nix-shared` `docs/nix-implementation-standard.md` (PR #34, commit `a88c733`) standardises the organization on upstream CppNix and DEPRECATES the darwin `determinate.nix` module.
-- So migrating the mac off Determinate is already organization policy with a proven script. That materially lowers this chunk's cost; re-cost it against the "wait for Determinate" option before resuming.
+- The `aarch64-darwin` LFS-over-token gap is now closable. See CHUNK 1.4 — a darwin probe is POSSIBLE but has NOT been run.
+- The earlier "darwin consumers are red until this lands" text is obsolete. It has landed; they are green. See CHUNK 1.2's completion evidence.
+- This repository's own PR CI was never affected: `validate.yml` uses `macos-latest`, which gets Nix 2.35.1 from the pinned `cachix/install-nix-action` v31.11.0.
+- The `.git`-suffix question in OPEN QUESTIONS is now moot as a way to avoid this chunk. Keep it recorded only as a possible fallback for any future sub-floor host.
 
-Repository: `/Volumes/Git/ci-runner-mac`. Two options remain:
+Prior art that made this cheap, in `nix-shared`, NOT `mac-workstation`:
 
-- Wait for a Determinate release built on Nix 2.35.
-- Move to upstream Nix under nix-darwin: flip `nix.enable = true`, set `nix.package`, and migrate `nix.custom.conf` settings back to `nix.settings.*`.
+- `nix-shared` `scripts/migrate-to-upstream.sh` (PR #36, merged 2026-07-13, commit `41de888`).
+- `nix-shared` `docs/nix-implementation-standard.md` (PR #34, commit `a88c733`) standardises the organization on upstream CppNix and DEPRECATES the darwin `determinate.nix` module. This migration executes that policy.
 
-Note that the host deploy alias is currently broken; the user is fixing it as an external dependency.
+Completion evidence:
 
-Completion evidence when resumed:
-
-- `ci-runner-mac` PR merged and deployed to `admins-mac-mini`.
-- `nix --version` on `admins-mac-mini` reports >= 2.35.0.
-- The runner label `macos-arm64-nix-darwin` is unchanged and the runner is online.
-- FlakeHub and cache authentication still work after the change, with the system `netrc-file` intact.
+- `ci-runner-mac` change deployed to `admins-mac-mini`. PARTIAL — deployed and verified, but from an UNMERGED branch. See the CAVEAT.
+- `nix --version` on `admins-mac-mini` reports >= 2.35.0. VERIFIED — 2.35.1.
+- The runner label `macos-arm64-nix-darwin` is unchanged and the runner is online. VERIFIED, with a post-migration darwin CI job green.
+- STRUCK, moot exactly as already struck for dell-foo: ~~FlakeHub and cache authentication still work after the change, with the system `netrc-file` intact.~~ There is no system `netrc-file` to keep intact. `git grep -i netrc` over `ci-runner-mac` returns nothing on either branch; the host never had a repo-managed netrc, and the only one that ever existed was Determinate's, which left with Determinate. Attic auth uses a sops secret (`config.sops.secrets.attic_token`), not netrc, and FlakeHub is not a substituter there. Post-migration jobs succeed, so cache auth demonstrably works.
 
 ## PHASE 1 — Centralize authentication in this repository
 
 One PR-executable unit that leaves the shared workflow ready for immediate use.
 
-Self-hosted probes run on `x86_64-linux` (dell-foo, Nix 2.35.1) only, because that is the sole self-hosted runner meeting the 2.35.0 floor. `aarch64-darwin` probe coverage waits on CHUNK 0.2. The guard itself is NOT scoped that way — it ships enforced on every platform, darwin included.
+Self-hosted probes as shipped run on `x86_64-linux` (dell-foo, Nix 2.35.1) only, because at the time it was the sole self-hosted runner meeting the 2.35.0 floor. Since CHUNK 0.2, `admins-mac-mini` also meets it, so darwin probe coverage is now possible — see CHUNK 1.4. It has not been added. The guard itself is NOT scoped that way — it ships enforced on every platform, darwin included.
 
 ### CHUNK 1.1 — Implement the shared authentication contract — COMPLETE
 
@@ -275,7 +277,7 @@ Completion evidence:
 - Both structural suites assert the guard exists on both surfaces and that the floor is a literal, not an input reference.
 - A guard message referencing runner label, found version, and required version is asserted by the suites.
 - Real CI on `x86_64-linux` (dell-foo, Nix 2.35.1) passes the guard.
-- `macos-arm64-nix-darwin` is NOT exempt (user decision). The guard fails it on Nix 2.34.7 until CHUNK 0.2 lands. Deliberate.
+- `macos-arm64-nix-darwin` is NOT exempt (user decision), and as of CHUNK 0.2 it PASSES the guard on Nix 2.35.1. Verified by executing the guard body on the host under the runner service's own PATH — exit 0, "meets the required minimum 2.35.0" — and by a post-migration `ci / build (aarch64-darwin)` job succeeding. The forcing function worked and is spent; darwin is no longer red, and this is no longer a merge blocker for PR #23.
 
 ### CHUNK 1.3 — README
 
@@ -312,6 +314,7 @@ Notes a future developer needs and cannot read off the code:
 - It fails closed on five distinct unscannable conditions — job list unreadable, paginated job list, no job matching an audited name, an audited job not completed, a completed log unreadable after retries — all prefixed `AUDIT INCOMPLETE, NOT A LEAK` so a red can never be misread as a leak. Only a log read in full can report `CREDENTIAL LEAK`.
 - It holds no App credential, needs no Nix, and the probes gave up their `actions: read` grant. It is also strictly wider than what it replaces: it scans probe 1's NESTED jobs, which could never have carried a step at all.
 - A suite assertion guards that the scan literals appear in no source the audit reads — `validate.yml` outside the audit job, plus `workflow.yml`, `setup/action.yml`, `auth/action.yml` and `auth/authenticate.sh` — so defect 2 cannot regress.
+- NEW OPTION, NOT DONE, recorded 2026-07-31. A fourth probe on `macos-arm64-nix-darwin` is now POSSIBLE: CHUNK 0.2 put that runner on Nix 2.35.1, so it meets the floor the earlier exclusion was based on. It would close the `aarch64-darwin` LFS-over-token gap, which is still unproven. This has NOT been implemented and is NOT claimed as done. Anyone adding it must also fold the new job name into `probe-log-credential-audit`'s audited-name list, or the audit fails closed on "no job matching an audited name". Note the CAVEAT in CHUNK 0.2 first — the mac's 2.35.1 currently comes from an unmerged branch deploy.
 
 DEVIATION from the original scope — probe 1 cannot do what the other two do:
 
@@ -324,7 +327,7 @@ Original scope, for reference: extend the existing `workflow_dispatch` validatio
 
 - Reusable workflow with organization access on GitHub-hosted Linux.
 - Setup action with organization access on GitHub-hosted Linux.
-- Standalone auth action on the self-hosted `x86_64-linux` runner (dell-foo, Nix 2.35.1), without the setup action. No darwin probe while CHUNK 0.2 is deferred.
+- Standalone auth action on the self-hosted `x86_64-linux` runner (dell-foo, Nix 2.35.1), without the setup action. No darwin probe was in scope, because CHUNK 0.2 was deferred when this shipped.
 - NEW REQUIREMENT (DEV-757): the self-hosted probe must set `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` at WORKFLOW level, otherwise `actions/create-github-app-token` will not run on `[self-hosted, Linux, X64]`. This probe is the proof that `dev-infra`'s `build_workstation_index` job can adopt the standalone action.
 - Each probe clones private `infra-base`, resolves private `nix-shared` through its `git+ssh://` flake URL with App credentials and no SSH key, and resolves at least one LFS-bearing input.
 - Every probe that can run steps clears the Nix git and fetcher caches first. Without this the result is a false green. See the DEVIATION above for probe 1.
@@ -346,6 +349,8 @@ Completion evidence:
 ### CHUNK 1.5 — Release gates — COMPLETE
 
 Every gate is closed on head `03d657e`, verified 2026-07-31.
+
+MERGE BLOCKER CLEARED 2026-07-31. The only outstanding blocker was the CHUNK 1.2 minimum-Nix guard failing on `macos-arm64-nix-darwin`. CHUNK 0.2 landed on that host and it now passes the guard, so no darwin consumer goes red on merge. PR #23 is ready for a human to review and land, and must stay a DRAFT until a human undrafts it. Carry forward the CHUNK 0.2 CAVEAT: `ci-runner-mac` PR #17 is still open, so the mac's compliance is branch-deployed until that merges.
 
 WITHDRAWN DIAGNOSIS, 2026-07-31. This chunk previously recorded probe 3's red as an environment defect outside this repository — a stale entry in dell-foo's system `/etc/nix/netrc`, referred to by `netrc-file` in `/etc/nix/nix.conf`, to be fixed by `dev-infra`. That is WRONG in every part and is retracted:
 
