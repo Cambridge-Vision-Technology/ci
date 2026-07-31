@@ -362,6 +362,139 @@ for composite in "$ACTION" "$AUTH_ACTION"; do
   fi
 done
 
+# --- Optional repository scoping narrows the capability, and nothing else ---
+#
+# enable-org-read-access grants read access to every repository in the
+# organization. A caller whose private dependencies are a known, fixed list
+# should be able to say so without giving up the shared implementation, so
+# org-read-repositories confines the minted token to a named list.
+#
+# It is a PURE ADDITION. The App token action splits `repositories` on commas
+# and newlines and drops empty entries, so the empty default leaves it with no
+# repository at all, and an `owner` with no repositories is exactly its
+# whole-organization case. An unset input therefore mints precisely the token
+# this repository has always minted, which is what every assertion below about
+# the default path is protecting.
+#
+# The name is scope-shaped, never mechanism-shaped. Octo STS trust policies
+# carry a `repositories` field just as an App installation token does, so the
+# input survives the move off App secrets (DEV-753) without a second
+# organization-wide sweep of call sites.
+
+extract_action_input() {
+  awk -v key="  $1:" '
+    $0 == key { in_input = 1; next }
+    in_input && /^  [a-zA-Z]/ { exit }
+    in_input { print }
+  ' "$2"
+}
+
+extract_step_from() {
+  awk -v needle="name: $1" '
+    index($0, needle) && !in_step { in_step = 1; print; next }
+    !in_step { next }
+    /^[[:space:]]*-[[:space:]]+(name:|uses:)/ { exit }
+    { print }
+  ' "$2"
+}
+
+mint_step_name='Mint GitHub App organization installation token'
+mechanism_named_scope_inputs=(
+  github-app-repositories
+  app-repositories
+  token-repositories
+  installation-repositories
+)
+
+for scoped_surface in "$ACTION" "$AUTH_ACTION"; do
+  scoped_surface_label="${scoped_surface#"$REPO_ROOT"/}"
+
+  if grep -qE '^[[:space:]]+org-read-repositories:' "$scoped_surface"; then
+    pass "$scoped_surface_label exposes the optional repository scope input org-read-repositories"
+  else
+    fail "$scoped_surface_label does not expose org-read-repositories, so a caller cannot narrow below organization-wide"
+  fi
+
+  scope_input_block="$(extract_action_input org-read-repositories "$scoped_surface")"
+  scope_description="$(printf '%s\n' "$scope_input_block" | tr '\n' ' ' | tr -s ' ')"
+
+  if printf '%s\n' "$scope_input_block" | grep -qE '^[[:space:]]+required: false[[:space:]]*$'; then
+    pass "org-read-repositories stays optional in $scoped_surface_label"
+  else
+    fail "org-read-repositories is not optional in $scoped_surface_label"
+  fi
+
+  if printf '%s\n' "$scope_input_block" | grep -qE '^[[:space:]]+default: ""[[:space:]]*$'; then
+    pass "org-read-repositories defaults to empty in $scoped_surface_label, which is the organization-wide token minted today"
+  else
+    fail "org-read-repositories does not default to empty in $scoped_surface_label, so it would change the behaviour of existing callers"
+  fi
+
+  if [[ "$scope_description" == *"every repository in this organization"* ]]; then
+    pass "$scoped_surface_label documents that the empty default is organization-wide"
+  else
+    fail "$scoped_surface_label does not document what the empty default of org-read-repositories means"
+  fi
+
+  mint_block="$(extract_step_from "$mint_step_name" "$scoped_surface")"
+
+  if printf '%s\n' "$mint_block" | grep -qF 'repositories: ${{ inputs.org-read-repositories }}'; then
+    pass "$scoped_surface_label wires org-read-repositories to create-github-app-token's repositories input"
+  else
+    fail "$scoped_surface_label declares org-read-repositories but never wires it to create-github-app-token's repositories input"
+  fi
+
+  scope_wirings="$(count_occurrences 'repositories: ${{ inputs.org-read-repositories }}' "$scoped_surface")"
+  if [ "$scope_wirings" -eq 1 ]; then
+    pass "org-read-repositories is wired exactly once in $scoped_surface_label"
+  else
+    fail "$scoped_surface_label wires org-read-repositories $scope_wirings times, expected exactly 1"
+  fi
+
+  # A fallback expression is the one edit that would silently narrow the default
+  # path: `${{ inputs.org-read-repositories || github.repository }}` looks
+  # harmless and confines every existing caller to its own repository.
+  scope_fallbacks="$(awk '/^[[:space:]]*#/ { next } index($0, "repositories: ${{") && index($0, "||") { count++ } END { print count + 0 }' "$scoped_surface")"
+  if [ "$scope_fallbacks" -eq 0 ]; then
+    pass "the repository scope in $scoped_surface_label carries no fallback expression, so an unset input stays empty"
+  else
+    fail "$scoped_surface_label has $scope_fallbacks fallback expressions on the repositories input, which would narrow the default path"
+  fi
+
+  mint_owner_line="$(printf '%s\n' "$mint_block" | awk 'index($0, "owner:") { sub(/^[[:space:]]*/, ""); print; exit }')"
+  if [ "$mint_owner_line" = 'owner: ${{ github.repository_owner }}' ]; then
+    pass "$scoped_surface_label still mints against the whole owner installation, unconditionally"
+  else
+    fail "$scoped_surface_label mints with owner line '$mint_owner_line', expected the unconditional repository owner"
+  fi
+
+  # Setting only the scope must mint nothing: the capability input alone decides
+  # whether a token exists at all, and the scope decides only how wide it is.
+  mint_gate_line="$(printf '%s\n' "$mint_block" | awk 'index($0, "if:") { sub(/^[[:space:]]*/, ""); print; exit }')"
+  if [[ "$mint_gate_line" != *"org-read-repositories"* ]]; then
+    pass "$scoped_surface_label does not let org-read-repositories gate whether a token is minted"
+  else
+    fail "$scoped_surface_label gates token minting on org-read-repositories, so the scope input changes whether a token exists"
+  fi
+
+  for mechanism_named_scope_input in "${mechanism_named_scope_inputs[@]}"; do
+    if grep -qF "$mechanism_named_scope_input" "$scoped_surface"; then
+      fail "$scoped_surface_label names the repository scope after the mechanism: $mechanism_named_scope_input"
+    else
+      pass "$scoped_surface_label carries no mechanism-named repository scope input: $mechanism_named_scope_input"
+    fi
+  done
+done
+
+# The scope is decided when the token is minted and is invisible below that: the
+# shared script receives a token and never learns how wide it is. That is what
+# makes this a pure addition rather than a second code path.
+if grep -qiE 'org.read.repositories' "$AUTH_SCRIPT"; then
+  fail "auth/authenticate.sh knows about the repository scope, so credential writing now has more than one path"
+else
+  pass "auth/authenticate.sh never sees the repository scope, so the credential-writing implementation is unchanged"
+fi
+
 # --- The auth action's contract is an environment side effect ---
 
 if grep -qE '^[[:space:]]{2}token:' "$AUTH_ACTION"; then

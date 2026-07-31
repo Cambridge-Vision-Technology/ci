@@ -31,6 +31,18 @@ inputs:
       authenticates with `github-token`, which reaches its own repository only.
     required: false
     default: "false"
+  org-read-repositories:
+    description: |
+      Optional narrowing of `enable-org-read-access`. Comma- or
+      newline-separated repository names, either `repository` or
+      `owner/repository` where the owner has to be this organization. Empty —
+      the default — grants read access to every repository in this
+      organization, which is what this action has always done. Narrow it when
+      the job's private dependencies are a known, fixed list; leave it empty
+      when they are not, as a flake whose inputs may change is. Ignored unless
+      `enable-org-read-access` is `'true'`.
+    required: false
+    default: ""
   github-app-id:
     description: |
       GitHub App ID used to mint the organization read token. Ignored unless
@@ -123,6 +135,13 @@ runs:
         echo "::error::$guard_message"
         exit 1
 
+    # The token stays owner-wide unless the caller narrows it. The action splits
+    # `repositories` on commas and newlines and drops empty entries, so the
+    # empty default leaves it with no repository at all, and an `owner` with no
+    # repositories is precisely its whole-organization case. Passing the input
+    # unconditionally is therefore identical to omitting the line, and there is
+    # deliberately no fallback expression here: a `||` would silently narrow the
+    # default path to one repository.
     - name: Mint GitHub App organization installation token
       id: org-read-app-token
       if: ${{ inputs.enable-org-read-access == 'true' }}
@@ -131,6 +150,7 @@ runs:
         app-id: ${{ inputs.github-app-id }}
         private-key: ${{ inputs.github-app-private-key }}
         owner: ${{ github.repository_owner }}
+        repositories: ${{ inputs.org-read-repositories }}
         permission-contents: read
 
     - name: Authenticate git and Nix to github.com

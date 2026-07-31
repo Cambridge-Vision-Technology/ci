@@ -84,6 +84,42 @@ They can be dropped from every call site once the token source moves to an STS (
 
 <!-- prettier-ignore-end -->
 
+### Narrowing the scope
+
+`org-read-repositories` is **optional**, and leaving it unset is the supported default.
+Unset, the job can read **every repository in your organisation** — exactly what enabling the capability has always meant, so no existing call site changes.
+
+Set it when the job's private dependencies are a known, fixed list, and you would rather it could not read anything else:
+
+```yaml
+jobs:
+  CI:
+    uses: $YOURORG/ci/.github/workflows/workflow.yml@main
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      enable-org-read-access: true
+      org-read-repositories: nix-shared, infra-base
+    secrets:
+      github-app-id: ${{ secrets.CI_FETCH_APP_ID }}
+      github-app-private-key: ${{ secrets.CI_FETCH_APP_PRIVATE_KEY }}
+```
+
+Names are comma- or newline-separated, and each is either `repository` or `owner/repository` where the owner must be your own organisation.
+The input is named for the **scope of the access**, not for the mechanism: a token, an STS trust policy (DEV-753) and every plausible successor all express scope as a list of repositories, so narrowing survives the mechanism moving.
+
+Leave it unset when the list is not knowable in advance — a flake whose inputs change, or a repository that pulls in transitive private inputs it does not name.
+A narrowed job that reaches for a repository outside the list fails at fetch time with a `404`, which reads as "repository not found" rather than as a permission error.
+
+<!-- prettier-ignore-start -->
+
+> [!TIP]
+> Narrowing is worth the maintenance only where the dependency list is stable.
+> If you find yourself editing `org-read-repositories` every time a flake input moves, the honest configuration is the organisation-wide default.
+
+<!-- prettier-ignore-end -->
+
 ## Choosing a surface
 
 Three surfaces expose the same capability. Pick the smallest one that fits.
@@ -94,7 +130,7 @@ Three surfaces expose the same capability. Pick the smallest one that fits.
 | `setup/action.yml`               | A bespoke job that needs the same setup — authentication, Nix, optional ssh-agent, optional LFS — but is not shaped like a flake check. For example a `tofu plan` job.            |
 | `auth/action.yml`                | Any job that needs credentials only, including a self-hosted job that manages its own checkout and Nix. This is what makes pasting a token-mint block into your repo unnecessary. |
 
-All three take `enable-org-read-access` and run the same `auth/authenticate.sh` implementation, at the revision you selected in `uses:`.
+All three take `enable-org-read-access` and its optional `org-read-repositories` narrowing, and run the same `auth/authenticate.sh` implementation, at the revision you selected in `uses:`.
 Only `auth/action.yml` exposes an output, `org-read-token`, as an escape hatch for tools it cannot configure — `gh`, for instance, reads neither the git credential helper nor Nix's `netrc-file`.
 Prefer the environment side effect.
 
@@ -155,6 +191,7 @@ An input marked `?lfs=1` therefore needs no SSH key — only `enable-org-read-ac
 | :----------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------- |
 | `enable-org-read-access` | Whether the job may read every repository in your organisation, including private flake inputs and their Git LFS objects. Requires the `github-app-id` and `github-app-private-key` secrets. | `false`                                                                          |
 | `enable-github-app-auth` | **Deprecated** alias for `enable-org-read-access`, on this workflow only. Removed only after the organisation-wide sweep of call sites (DEV-760); use `enable-org-read-access`.              | `false`                                                                          |
+| `org-read-repositories`  | **Optional.** Comma- or newline-separated `repository` or `owner/repository` names the organisation read access is confined to. Empty means every repository in your organisation.           | `""` (organisation-wide)                                                         |
 | `enable-ssh-agent`       | **Deprecated**, still accepted. Whether to enable [`webfactory/ssh-agent`][ssh-agent] in the workflow. If you set this to `true` you need to supply a secret named `ssh-private-key`.        | `false`                                                                          |
 | `enable-lfs`             | Whether to enable Git LFS when checking out the repository. Set to `true` if your repository uses Git LFS for large files.                                                                   | `false`                                                                          |
 | `check-dev-shells`       | Whether to validate devShells by running `nix develop --command true`. Set to `false` if your devShells are expensive or unavailable on some systems.                                        | `true`                                                                           |
