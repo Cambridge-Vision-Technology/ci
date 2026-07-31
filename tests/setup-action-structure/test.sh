@@ -52,6 +52,29 @@ extract_guard_body() {
   ' "$1"
 }
 
+# Counts lines carrying a needle that sit OUTSIDE the shared script's
+# remove_legacy_* functions. Those functions are the one place allowed to name
+# the artifacts earlier revisions of this repository left behind, because
+# removing them is the only thing this script does with them. A top-level
+# function opens at column 0 and closes at a column-0 brace, so tracking those
+# two shapes is enough. Whole-line comments are dropped, so prose describing a
+# legacy artifact can neither satisfy nor break an assertion about the code.
+lines_outside_legacy_cleanup() {
+  awk -v needle="$1" '
+    /^[a-z_]+\(\) \{$/ {
+      current_function = $0
+      sub(/\(\) \{$/, "", current_function)
+      next
+    }
+    /^\}$/ { current_function = ""; next }
+    /^[[:space:]]*#/ { next }
+    index($0, needle) == 0 { next }
+    current_function ~ /^remove_legacy_/ { next }
+    { count++ }
+    END { print count + 0 }
+  ' "$AUTH_SCRIPT"
+}
+
 # --- Files exist at the conventional paths ---
 
 for required_file in "$ACTION" "$AUTH_ACTION" "$AUTH_SCRIPT"; do
@@ -404,10 +427,22 @@ else
   fail "auth/authenticate.sh does not write the credential file under RUNNER_TEMP"
 fi
 
-if grep -qF '/tmp/netrc' "$AUTH_SCRIPT"; then
-  fail "auth/authenticate.sh still uses the fixed path /tmp/netrc"
+# The fixed path earlier revisions of this repository invented is never written
+# again, but it still has to be NAMED, because this script is now what removes
+# the copy those revisions left behind on every self-hosted runner. Both halves
+# are asserted: every mention lives inside the legacy cleanup, and the netrc
+# this script actually configures is the job-scoped one under RUNNER_TEMP.
+fixed_path_netrc_outside_cleanup="$(lines_outside_legacy_cleanup '/tmp/netrc')"
+if [ "$fixed_path_netrc_outside_cleanup" -eq 0 ]; then
+  pass "auth/authenticate.sh names the fixed path /tmp/netrc only inside the legacy cleanup"
 else
-  pass "auth/authenticate.sh does not use the fixed path /tmp/netrc"
+  fail "auth/authenticate.sh names /tmp/netrc $fixed_path_netrc_outside_cleanup times outside the legacy cleanup, so it may still be writing to it"
+fi
+
+if grep -qF "printf 'netrc-file = %s\\n' \"\$credential_file\"" "$AUTH_SCRIPT"; then
+  pass "the only netrc-file auth/authenticate.sh configures is the job-scoped credential file"
+else
+  fail "auth/authenticate.sh does not point netrc-file at the job-scoped credential file"
 fi
 
 for job_scoped_file in \
@@ -428,11 +463,14 @@ for restricted_file in credential_file git_credential_file nix_conf; do
   fi
 done
 
-# --- No token-bearing file is written into HOME ---
+# --- HOME is only ever cleaned up, never written into ---
 # A token written under HOME outlives the job on a self-hosted runner, and
 # replacing machine-owner files there destroys configuration that is not ours.
+# HOME is touched for exactly one reason: taking back the credential artifacts
+# earlier revisions of THIS repository left there. That is a different claim
+# from replacing the owner's files, and it is confined to the legacy cleanup.
 
-for home_write in '${HOME}/.netrc' '${HOME}/.git-credentials' 'ln -s' 'mkdir -p "$nix_conf_directory"'; do
+for home_write in 'ln -s' 'mkdir -p "$nix_conf_directory"'; do
   if grep -qF "$home_write" "$AUTH_SCRIPT"; then
     fail "auth/authenticate.sh still writes into HOME: $home_write"
   else
@@ -440,11 +478,220 @@ for home_write in '${HOME}/.netrc' '${HOME}/.git-credentials' 'ln -s' 'mkdir -p 
   fi
 done
 
-home_writes="$(awk '/^[[:space:]]*#/ { next } /(rm|ln|mv|cp|touch|chmod|>)/ && /\$\{?HOME\}?\// { count++ } END { print count + 0 }' "$AUTH_SCRIPT")"
-if [ "$home_writes" -eq 0 ]; then
-  pass "auth/authenticate.sh never creates, replaces or deletes a file under HOME"
+token_into_home="$(awk '
+  /^[[:space:]]*#/ { next }
+  index($0, "ORG_READ_TOKEN") && index($0, "HOME") { count++ }
+  END { print count + 0 }
+' "$AUTH_SCRIPT")"
+if [ "$token_into_home" -eq 0 ]; then
+  pass "auth/authenticate.sh never names the token and a HOME path in the same statement"
 else
-  fail "auth/authenticate.sh has $home_writes statements that create, replace or delete files under HOME"
+  fail "auth/authenticate.sh has $token_into_home statements that could write the token into HOME"
+fi
+
+home_writes_outside_cleanup="$(awk '
+  /^[a-z_]+\(\) \{$/ {
+    current_function = $0
+    sub(/\(\) \{$/, "", current_function)
+    next
+  }
+  /^\}$/ { current_function = ""; next }
+  /^[[:space:]]*#/ { next }
+  current_function ~ /^remove_legacy_/ { next }
+  /(rm|ln|mv|cp|touch|chmod|>)/ && /\$\{?HOME\}?\// { count++ }
+  END { print count + 0 }
+' "$AUTH_SCRIPT")"
+if [ "$home_writes_outside_cleanup" -eq 0 ]; then
+  pass "auth/authenticate.sh creates, replaces or deletes a file under HOME only inside the legacy cleanup"
+else
+  fail "auth/authenticate.sh has $home_writes_outside_cleanup statements outside the legacy cleanup that create, replace or delete files under HOME"
+fi
+
+# --- Legacy credential artifacts are removed on EVERY invocation ---
+# Earlier revisions of this repository wrote five credential artifacts and
+# removed none of them. HOME and /tmp persist between jobs on a self-hosted
+# runner, so a dead installation token was found in plaintext in a runner
+# user's HOME hours after the job that wrote it ended, and any step running
+# before this script — or any step that loses NIX_USER_CONF_FILES — still picks
+# that token up and is answered 401 even by a PUBLIC repository. The cleanup is
+# therefore unconditional: the DEFAULT path, which asks for no organization
+# access at all, is exactly the path that inherits the poisoned runner.
+
+legacy_removers=(
+  remove_legacy_home_netrc
+  remove_legacy_home_git_credentials
+  remove_legacy_fixed_path_netrc
+  remove_legacy_nix_conf_netrc_file
+)
+for legacy_remover in "${legacy_removers[@]}"; do
+  if grep -qE "^${legacy_remover}\(\) \{$" "$AUTH_SCRIPT"; then
+    pass "auth/authenticate.sh defines the legacy remover: $legacy_remover"
+  else
+    fail "auth/authenticate.sh does not define the legacy remover: $legacy_remover"
+  fi
+
+  if awk -v needle="  $legacy_remover" '
+    $0 == "remove_legacy_credential_artifacts() {" { in_driver = 1; next }
+    in_driver && /^\}$/ { in_driver = 0 }
+    in_driver && $0 == needle { found = 1 }
+    END { exit !found }
+  ' "$AUTH_SCRIPT"; then
+    pass "the legacy cleanup driver calls $legacy_remover"
+  else
+    fail "the legacy cleanup driver never calls $legacy_remover, so that artifact is left behind"
+  fi
+done
+
+# A call at column 0 is unconditional: a call inside `if` — including an
+# ORG_READ_ACCESS_ENABLED branch — would be indented. Gating the cleanup on the
+# capability would leave the machines that need it most untouched.
+unconditional_cleanup_calls="$(awk '/^remove_legacy_credential_artifacts$/ { count++ } END { print count + 0 }' "$AUTH_SCRIPT")"
+if [ "$unconditional_cleanup_calls" -eq 1 ]; then
+  pass "the legacy cleanup is invoked exactly once, unconditionally, at the top level of the script"
+else
+  fail "the legacy cleanup has $unconditional_cleanup_calls unconditional top-level invocations, expected exactly 1"
+fi
+
+if awk '
+  index($0, "if [ \"$ORG_READ_ACCESS_ENABLED\" = true ]; then") { in_branch = 1; next }
+  in_branch && /^fi$/ { in_branch = 0; next }
+  in_branch && index($0, "remove_legacy") { found = 1 }
+  END { exit found }
+' "$AUTH_SCRIPT"; then
+  pass "no part of the legacy cleanup is gated on ORG_READ_ACCESS_ENABLED"
+else
+  fail "the legacy cleanup is gated on ORG_READ_ACCESS_ENABLED, so the default path keeps the leaked token"
+fi
+
+legacy_cleanup_line="$(awk '/^remove_legacy_credential_artifacts$/ { print NR; exit }' "$AUTH_SCRIPT")"
+first_credential_write_line="$(line_of 'credential_file="$(mktemp' "$AUTH_SCRIPT")"
+if [[ -n "$legacy_cleanup_line" && -n "$first_credential_write_line" && "$legacy_cleanup_line" -lt "$first_credential_write_line" ]]; then
+  pass "the legacy cleanup runs before this job's own credentials are written"
+else
+  fail "the legacy cleanup does not run before this job's own credentials are written"
+fi
+
+# --- The netrc removal is confined to the shape this repository emitted ---
+# A netrc belongs to the machine owner. Only an entry that is exactly
+# `machine github.com` + `login x-access-token` + `password <token>` and
+# nothing else is ours; a github.com entry with any other login is the owner's
+# own credential, and any other machine is none of our business.
+
+netrc_shape_guards=(
+  'tokens[1] == "machine" && tokens[2] == "github.com"'
+  'tokens[3] == "login" && tokens[4] == "x-access-token"'
+  'token_count == 6'
+)
+for netrc_shape_guard in "${netrc_shape_guards[@]}"; do
+  if grep -qF "$netrc_shape_guard" "$AUTH_SCRIPT"; then
+    pass "the netrc removal is confined by: $netrc_shape_guard"
+  else
+    fail "the netrc removal is not confined by: $netrc_shape_guard, so a machine owner's entry could be destroyed"
+  fi
+done
+
+# Without a per-entry keep branch the filter would drop the whole file rather
+# than the one entry, which is exactly what "not ours to destroy" forbids.
+if awk '
+  $0 == "remove_legacy_home_netrc() {" { in_function = 1; next }
+  in_function && /^\}$/ { in_function = 0 }
+  in_function && index($0, "if (keep) {") { found = 1 }
+  END { exit !found }
+' "$AUTH_SCRIPT"; then
+  pass "the netrc filter keeps every entry it did not identify as this repository's"
+else
+  fail "the netrc filter has no keep branch, so entries that are not ours are not preserved"
+fi
+
+if grep -qF '$1 == "machine" || $1 == "default"' "$AUTH_SCRIPT"; then
+  pass "the netrc filter splits the file into entries, so a mixed file loses only our entry"
+else
+  fail "the netrc filter does not split the file into entries, so it cannot remove one entry from a mixed file"
+fi
+
+# --- The git-credentials removal is confined to the line this repository wrote ---
+
+if grep -qF "awk '!/^https:\\/\\/x-access-token:[^@\\/]*@github\\.com\\/?\$/'" "$AUTH_SCRIPT"; then
+  pass "the git-credentials removal is confined to the https://x-access-token:<token>@github.com line"
+else
+  fail "the git-credentials removal is not confined to this repository's own credential line"
+fi
+
+# --- The fixed-path netrc is removed, and a foreign owner is reported ---
+# /tmp is shared and sticky, so only the owner may unlink a file there. A job
+# that cannot remove another user's copy reports it and continues, because
+# failing instead would make every job on that runner red forever over a file
+# no job is able to remove. It is reported, never suppressed.
+
+if awk '
+  $0 == "remove_legacy_fixed_path_netrc() {" { in_function = 1; next }
+  in_function && /^\}$/ { in_function = 0 }
+  in_function && index($0, "if [ -O \"$fixed_path_netrc\" ]; then") { owner_branch = 1 }
+  in_function && index($0, "rm -f \"$fixed_path_netrc\"") { removal = 1 }
+  END { exit !(owner_branch && removal) }
+' "$AUTH_SCRIPT"; then
+  pass "the fixed-path netrc is removed when this job owns it, and ownership is tested explicitly"
+else
+  fail "the fixed-path netrc is not removed under an explicit ownership test"
+fi
+
+if grep -qF 'belongs to another user, so this job cannot unlink it' "$AUTH_SCRIPT"; then
+  pass "a fixed-path netrc owned by another user is reported rather than silently skipped"
+else
+  fail "a fixed-path netrc owned by another user is skipped silently"
+fi
+
+# --- The Nix configuration keeps every setting except the one we wrote ---
+
+if grep -qF 'if (key == "netrc-file" && value == "/tmp/netrc") {' "$AUTH_SCRIPT"; then
+  pass "only a netrc-file that still names the fixed path is removed from the user nix.conf"
+else
+  fail "the user nix.conf filter is not confined to netrc-file = /tmp/netrc, so a machine owner's setting could be destroyed"
+fi
+
+if awk '
+  $0 == "remove_legacy_nix_conf_netrc_file() {" { in_function = 1; next }
+  in_function && /^\}$/ { in_function = 0 }
+  in_function && $0 ~ /^[[:space:]]*print$/ { found = 1 }
+  END { exit !found }
+' "$AUTH_SCRIPT"; then
+  pass "every other line of the user nix.conf is printed back unchanged"
+else
+  fail "the user nix.conf filter does not print the settings it is not removing"
+fi
+
+# --- Filtered files are replaced in place, or removed when nothing is left ---
+
+if grep -qF 'cat "$filtered" > "$target"' "$AUTH_SCRIPT"; then
+  pass "a surviving file is rewritten in place, keeping the machine owner's inode, mode and ownership"
+else
+  fail "a surviving file is not rewritten in place, so the machine owner's mode or ownership can change"
+fi
+
+if awk '
+  $0 == "apply_legacy_filter() {" { in_function = 1; next }
+  in_function && /^\}$/ { in_function = 0 }
+  in_function && index($0, "if file_has_content \"$filtered\"; then") { guard = 1 }
+  in_function && index($0, "rm -f \"$target\"") { removal = 1 }
+  END { exit !(guard && removal) }
+' "$AUTH_SCRIPT"; then
+  pass "a file left holding nothing but our entry is removed rather than left as an empty stub"
+else
+  fail "a file emptied by the cleanup is left behind as an empty stub"
+fi
+
+# A file this repository never wrote into must not be rewritten at all, so its
+# modification time and inode are evidence the cleanup left it alone.
+if grep -qF 'cmp -s "$target" "$filtered" || difference_status=$?' "$AUTH_SCRIPT"; then
+  pass "an unchanged file is detected by comparison and left completely untouched"
+else
+  fail "the cleanup does not compare before rewriting, so it touches files it changed nothing in"
+fi
+
+if grep -qF 'if [ "$difference_status" -ne 1 ]; then' "$AUTH_SCRIPT"; then
+  pass "a comparison that failed to read either file is a hard error, not a silent 'they differ'"
+else
+  fail "the cleanup treats an unreadable comparison as a difference, which would rewrite a file it never read"
 fi
 
 # --- Nix is reconfigured through the job-scoped environment, not HOME state ---

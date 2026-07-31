@@ -4,12 +4,12 @@ Linear: https://linear.app/aykua/issue/DEV-759/ci-own-ci-credential-acquisition-
 
 ## CURRENT STATUS
 
-pr_implementation_status: IN_PROGRESS — CHUNKS 1.1, 1.2, 1.3 and 1.4 complete, including the 2026-07-30 credential-audit redesign; CHUNK 1.5 local gates verified (407 assertions, prettier, actionlint, `nix flake check`), PR-side gates outstanding
+pr_implementation_status: IN_PROGRESS — CHUNKS 1.1, 1.2, 1.3 and 1.4 complete, including the 2026-07-30 credential-audit redesign and the 2026-07-31 legacy-artifact self-heal; CHUNK 1.5 local gates verified (477 assertions, prettier, actionlint, `nix flake check`), PR-side gates outstanding
 live_acceptance_status: NOT_APPLICABLE
 current_phase: PHASE 1
 current_chunk: CHUNK 1.5
 valid_phases: PHASE 0, PHASE 1
-next_pr_action: Close the two GitHub-side gates — the normal pull-request checks on the pushed head revision, and a manual probe dispatch against the PR branch whose run the pull request then links to. Probe 3's public A/B check is expected to stay red on dell-foo's stale system netrc, which is a `dev-infra` fix
+next_pr_action: Close the two GitHub-side gates — the normal pull-request checks on the pushed head revision, and a manual probe dispatch against the PR branch whose run the pull request then links to. Probe 3's public A/B check is expected to go GREEN on the self-heal revision; the earlier red was this repository's own leaked credential state on dell-foo, not a `dev-infra` defect, and it needs no host access to fix
 next_post_merge_action: none
 
 ## DELIVERABLES
@@ -42,6 +42,9 @@ A reviewer can verify completion as follows:
 - `access-tokens` covers only the `github:`, `gitlab:` and `sourcehut:` fetchers plus curl tarball fetches. It does not cover `git+ssh` or `git+https` inputs, and does not cover `builtins.fetchurl`.
 - `access-tokens` supports path-prefix scoping (`github.com/Cambridge-Vision-Technology=…`). Always use `extra-access-tokens`, which is additive; never `access-tokens`, which clobbers.
 - A netrc entry for `machine github.com` does not authenticate `github:` refs, because that fetcher talks to `api.github.com`.
+- TRAP, cost this workstream a wrong diagnosis on 2026-07-30. `env -u NIX_USER_CONF_FILES nix …` does NOT isolate Nix from user credentials. It does the OPPOSITE of what it reads like. `NIX_USER_CONF_FILES` OVERRIDES Nix's user-config list; unsetting it does not take user configuration out of scope, it makes Nix fall back to its DEFAULT list, whose first entry is `${XDG_CONFIG_HOME:-$HOME/.config}/nix/nix.conf` — precisely the file earlier revisions of this repository poisoned. Subtracting the variable SELECTS the leaked config instead of escaping it.
+- Genuine isolation is EXPLICIT, never subtractive, and takes two parts: point `NIX_USER_CONF_FILES` at an EMPTY file, which REPLACES the default list rather than restoring it; AND pass `--option netrc-file <empty file>` on the command line, because a command-line option outranks every configuration file including `/etc/nix/nix.conf`, which the first part cannot reach. A credential-free check that omits either part is not credential-free.
+- Corollary for reading any such result: a credential-free request that comes back `401 Bad credentials` is never an endpoint-discovery result. It is proof that host state reached Nix and that the isolation itself is broken. Both public A/B checks in `validate.yml` now assert this explicitly instead of falling through.
 
 ### Git LFS
 
@@ -59,7 +62,9 @@ A reviewer can verify completion as follows:
 - The GCP `runner-1`..`runner-4` fleet has been offline 29-46 days and a `retire-gcp-fleet` branch exists in dev-infra. Treat as retired.
 - GitHub-hosted runners already receive Nix 2.35.1 through the `cachix/install-nix-action` v31.11.0 pin already present in `workflow.yml` and `setup/action.yml`. No change is needed in this repository for them.
 - `workflow.yml` skips Nix installation when Nix is already present (the `Detect existing Nix` step), so CI never upgrades a self-hosted runner. Each runner's own configuration repository is the only lever.
-- Both runners currently have empty `access-tokens`. `netrc-file` differs: `/etc/nix/netrc` on dell-foo, `/nix/var/determinate/netrc` on the mac.
+- Both runners currently have empty `access-tokens`.
+- CORRECTED 2026-07-31, checked on the host. dell-foo has NO system netrc at all: `/etc/nix/netrc` DOES NOT EXIST, and nothing in `/etc/nix/nix.conf` or any NixOS module sets `netrc-file`. The earlier entry here claiming a system `netrc-file = /etc/nix/netrc` on dell-foo was wrong, and the CHUNK 1.5 diagnosis built on it was wrong with it. The mac's Determinate-managed `/nix/var/determinate/netrc` is real and unaffected by this correction.
+- What actually held the stale credential on dell-foo was this repository's own leftovers in the RUNNER USER's home — `$HOME/.netrc`, `$HOME/.git-credentials`, a global `credential.helper`, and `netrc-file = /tmp/netrc` in the USER `nix.conf` — not any machine-owner or system state. See the SECURITY entry under "Defects in the pre-CHUNK-1.1 `workflow.yml`".
 
 ### The SSH path is dead organization-wide (live-verified 2026-07-29)
 
@@ -89,6 +94,9 @@ A reviewer can verify completion as follows:
 - Three redundant credential mechanisms are written (`~/.netrc`, `~/.git-credentials`, `credential.helper store`) where one suffices.
 - `netrc-file` is set in the user `nix.conf`, which clobbers Determinate's system `netrc-file` because the setting is scalar and user config wins. This breaks FlakeHub and cache auth on the mac runner. Use `nix.custom.conf` and additive settings, and never override a Determinate-managed value.
 - The fixed path `/tmp/netrc` lets concurrent jobs on self-hosted runners clobber each other, and credential files are never cleaned up, so tokens outlive the job. Use `$RUNNER_TEMP` and clean up.
+- SECURITY, CONFIRMED LIVE 2026-07-31 on dell-foo. That last item is not theoretical and is not merely hygiene. `origin/main`'s `setup/action.yml` and `workflow.yml` wrote FIVE credential artifacts and removed NONE of them: `$HOME/.netrc`, `/tmp/netrc`, `$HOME/.git-credentials`, a GLOBAL `credential.helper store` bound to that file, and `netrc-file = /tmp/netrc` in the user `nix.conf`. On a self-hosted runner `$HOME` and `/tmp` persist between jobs, so a plaintext `ghs_` App installation token sat in the runner user's home directory long after the job that minted it ended. It has since expired — installation tokens live one hour — so this is a disclosed-and-dead credential, not a live one, but the exposure window was real and unbounded by anything except the token's own lifetime.
+- DELIVERABLE 8's "the private key and token are not printed or uploaded" was therefore effectively VIOLATED on self-hosted runners by the pre-CHUNK-1.1 code. Not through the logs, which were clean, and not through artifacts, which were never uploaded — through persistent on-disk state on a shared machine, which the deliverable's wording did not anticipate. Read deliverable 8 as covering on-disk residue as well; CHUNK 1.1's self-heal is what makes it true.
+- Second-order consequence, and the reason a stale token is worse than a merely untidy one: the leftover `netrc-file` and global credential helper are read by EVERY later job on that runner, including jobs that ask for no organization access at all. Those jobs then send an expired token where they would otherwise have sent nothing, and GitHub answers `401 Bad credentials` — even for a PUBLIC repository, which is otherwise unauthenticated. A dead credential is not inert; it converts anonymous success into authenticated failure.
 - `enable-ssh-agent` and `enable-github-app-auth` are mutually destructive: the rewrite is installed before ssh-agent starts, and it breaks LFS as described above.
 - `setup/action.yml` has no `insteadOf` rewrite and no stale-rewrite cleanup. It has drifted from `workflow.yml` on the one mechanism that matters.
 - No `access-tokens` are set when Nix is pre-installed, so `github:` refs hit the 60/hr anonymous API limit on self-hosted runners.
@@ -213,10 +221,16 @@ Self-hosted probes run on `x86_64-linux` (dell-foo, Nix 2.35.1) only, because th
 
 ### CHUNK 1.1 — Implement the shared authentication contract — COMPLETE
 
-Verified: 205 assertions across the three shell contract suites; actionlint, prettier and shellcheck clean; sandbox-verified against real Nix.
+Verified: 205 assertions at first completion; 477 across the three shell contract suites after the 2026-07-31 self-heal extension; actionlint, prettier and shellcheck clean; sandbox-verified against real Nix.
 
 Notes a future developer needs and cannot read off the code:
 
+- EXTENDED 2026-07-31. Writing no credential into `HOME` was necessary but NOT sufficient, because `origin/main` already had — and every runner that ever ran it still carries. `auth/authenticate.sh` therefore also REMOVES the five legacy artifacts listed in CONSTRAINTS, and this is the one thing it does to machine-owner files.
+- The removal is UNCONDITIONAL and runs FIRST, on the DEFAULT path too. Unconditional because the job that suffers most from a stale token is precisely the one that asked for no organization access — it inherits someone else's expired credential and gets a 401 from a public repository. Gating the cleanup on `ORG_READ_ACCESS_ENABLED` would skip the machines that need it. First, because everything after it either writes the replacement credentials or points Nix at them, and none of that may race a stale file still named by Nix's default user-config list.
+- Ours is distinguished from a machine owner's BY EXACT SHAPE, never by filename and never by machine name. The netrc entry must be exactly `machine github.com` / `login x-access-token` / `password <token>` and nothing else — a `github.com` entry with any other login is the owner's own credential, an entry carrying any further key was not written by us, and any other machine is none of our business. The git-credentials line must match `^https://x-access-token:[^@/]*@github\.com/?$`. The `nix.conf` setting must be `netrc-file` valued exactly `/tmp/netrc`. Everything else in every one of those files survives verbatim, and a file we did not modify keeps its original inode, mode, owner and mtime.
+- A file left holding nothing after our entry is removed is DELETED rather than left as an empty stub the machine owner never asked for. A file that survives is rewritten by redirection into the existing path, not by moving a temporary over it, so the owner's inode, mode and ownership are preserved.
+- `/tmp/netrc` is the exception with no shape check, because the fixed path is this repository's own invention and no machine owner has a claim on it. When it belongs to ANOTHER user it is REPORTED LOUDLY and is NOT fatal: `/tmp` is sticky, so only its owner can unlink it, and failing hard would red every job on the runner forever over a file no job is able to remove. Only the runner owner can clear that case.
+- This fix needs NO host access and NO `dev-infra` change. It is self-healing: the first job to run the new script on any runner cleans that runner.
 - Credentials are split BY CONSUMER, deliberately. Git uses `credential.helper store --file=` pointing at a `$RUNNER_TEMP` file. Nix's LFS/curl path uses `netrc-file`, because LFS transfers cannot call a credential helper. One mechanism per consumer, no overlap. This is not the redundancy the old `workflow.yml` had.
 - Nix settings are injected by exporting `NIX_USER_CONF_FILES` through `$GITHUB_ENV`, NOT by writing `$HOME/.config/nix/nix.conf`. The script reproduces Nix's XDG default list so machine-owner settings still apply after ours.
 - `.github/actionlint.yaml` exists solely because actionlint 1.7.12 does not yet know `job.workflow_repository` / `job.workflow_sha`. The suppression is scoped to those two property names in `workflow.yml` only; a bogus property is still reported.
@@ -275,7 +289,7 @@ Completion evidence:
 
 ### CHUNK 1.4 — Manual probes — COMPLETE
 
-Verified: 407 assertions across the three shell contract suites (8 runner-map-transform, 167 setup-action-structure, 232 workflow-structure); actionlint and prettier clean; the pull-request exclusion traced through both gate terms and through the audit's `always()`.
+Verified: 477 assertions across the three shell contract suites (8 runner-map-transform, 192 setup-action-structure, 277 workflow-structure); actionlint and prettier clean; the pull-request exclusion traced through both gate terms and through the audit's `always()`.
 
 Notes a future developer needs and cannot read off the code:
 
@@ -286,6 +300,8 @@ Notes a future developer needs and cannot read off the code:
 - The fixture flake at `tests/org-read-probe` deliberately has NO committed `flake.lock`. A lock would let Nix serve the tree from the local store with no network fetch, defeating the probe.
 - `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` has to be workflow-level, which also affects `lints` and `setup-composite-smoke` on the normal pull-request path by forcing Node 24 for their JavaScript actions. Low risk, but a behaviour change whose only beneficiary is probe 3.
 - The public-repository A/B check matches the surrounding Nix error phrase (`HTTP error 403` / `exceeded its LFS budget`, and `HTTP error 422`), never a bare three-digit number. The log carries store paths and URLs, and a store hash containing `403` with no `422` present would read as a false green.
+- CORRECTED 2026-07-31. The A/B check's isolation was `env -u NIX_USER_CONF_FILES`, which SELECTED the poisoned user `nix.conf` instead of escaping it — see the TRAP entry in CONSTRAINTS. It is now explicit: `NIX_USER_CONF_FILES` pointed at an EMPTY file, plus `--option netrc-file <empty>` and `--option access-tokens ""` on the command line so no configuration file, system one included, can put a credential back.
+- The A/B check now also fails closed on `HTTP error 401` / `Bad credentials`. A request that carries no credential cannot be rejected for its credential, so a 401 means the isolation leaked and no result in that run means anything. Previously a 401 fell through to the generic fail-closed branch and read as an unexplained red, which is what sent the 2026-07-30 diagnosis down the wrong path.
 - REDESIGNED 2026-07-30. The credential audit is no longer a step inside each probe. It is a separate job, `probe-log-credential-audit`, that `needs:` all three probes and reads their logs after they complete.
 - Two defects forced this, both found by live runs. (1) A job cannot read its own log: `GET /actions/jobs/{id}/logs` answers 404 for an in-progress job, so the in-job check failed closed on every run and could never pass. (2) The runner echoes every `run:` body into the job log, so the old check's own source line carrying the literal `PRIVATE KEY` would have matched itself — a guaranteed FALSE-POSITIVE leak the moment the 404 was fixed.
 - The audit is gated `always() && github.event_name == 'workflow_dispatch' && inputs.run-org-read-probes`. `always()` keeps a leak in a FAILED probe catchable; `always()` overrides only the implicit needs-succeeded condition, never an explicit term, so the same dispatch gate still keeps it off pull requests.
@@ -325,16 +341,23 @@ Completion evidence:
 
 ### CHUNK 1.5 — Release gates — LOCAL GATES COMPLETE, PR-SIDE GATES OUTSTANDING
 
-Verified locally 2026-07-30 on the audit-redesign revision. The two remaining gates are GitHub-side and cannot be closed from the workstation.
+Verified locally 2026-07-31 on the legacy-artifact self-heal revision. The two remaining gates are GitHub-side and cannot be closed from the workstation.
+
+WITHDRAWN DIAGNOSIS, 2026-07-31. This chunk previously recorded probe 3's red as an environment defect outside this repository — a stale entry in dell-foo's system `/etc/nix/netrc`, referred to by `netrc-file` in `/etc/nix/nix.conf`, to be fixed by `dev-infra`. That is WRONG in every part and is retracted:
+
+- `/etc/nix/netrc` does not exist on dell-foo, and no system configuration there sets `netrc-file` at all.
+- The stale credential was in the RUNNER USER's home, and this repository's own `origin/main` put it there. `setup/action.yml` and `workflow.yml` wrote `$HOME/.netrc`, `/tmp/netrc`, `$HOME/.git-credentials`, a global `credential.helper store` and `netrc-file = /tmp/netrc` in the user `nix.conf`, and cleaned up none of them. `$HOME` and `/tmp` persist across jobs on a self-hosted runner.
+- The A/B check's `env -u NIX_USER_CONF_FILES` did not isolate Nix from that state; it made Nix fall back to its default user-config list and read the poisoned file. See the TRAP entry in CONSTRAINTS.
+- There is NO `dev-infra` action item and NO host-side fix required. CHUNK 1.1's self-heal removes the artifacts on every invocation including the default path, so the first job to run the new script on a runner cleans it. The fix needs no host access.
 
 Completion evidence:
 
 - Prettier passes. VERIFIED — `prettier --check .` reports all matched files conform.
 - Actionlint passes. VERIFIED — clean, with the scoped `.github/actionlint.yaml` suppression still the only exception.
-- All three shell contract suites pass when run directly; `nix flake check` does not execute them. VERIFIED — 407 assertions, 0 failures: 8 runner-map-transform, 167 setup-action-structure, 232 workflow-structure. The runner-map suite needs `yq`, so run it as CI does, under `nix shell nixpkgs#yq-go`.
+- All three shell contract suites pass when run directly; `nix flake check` does not execute them. VERIFIED — 477 assertions, 0 failures: 8 runner-map-transform, 192 setup-action-structure, 277 workflow-structure. The runner-map suite needs `yq`, so run it as CI does, under `nix shell nixpkgs#yq-go`.
 - `nix flake check` passes. VERIFIED — `devShells` only, as CONSTRAINTS records; it evaluates no suite.
 - The normal pull-request checks pass. OUTSTANDING — awaits the pushed head revision.
-- The pull request links to the successful manual probe run. OUTSTANDING — awaits the dispatch against the pushed revision. Probe 3 is expected to stay red on an environment defect outside this repository: dell-foo's system `/etc/nix/netrc`, referenced by `netrc-file` in `/etc/nix/nix.conf`, holds a stale github.com entry that Nix's LFS curl path sends even to a public repository, so the public A/B check answers HTTP 401 "Bad credentials". That is a `dev-infra` runner-configuration fix, not a code fix here.
+- The pull request links to the successful manual probe run. OUTSTANDING — awaits the dispatch against the pushed revision. Probe 3 is now expected to PASS: the self-heal clears the leaked artifacts before anything else runs, and the A/B check's isolation is explicit rather than subtractive. If it stays red, the 401 branch added in CHUNK 1.4 distinguishes a leaked-isolation failure from a genuine endpoint-discovery result, so the next diagnosis starts from evidence rather than inference.
 
 ## POST-MERGE ACCEPTANCE
 

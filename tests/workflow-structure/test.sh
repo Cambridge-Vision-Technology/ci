@@ -1082,10 +1082,65 @@ for probe_job in "${step_driven_probe_jobs[@]}"; do
     fail "$probe_job does not run the credential-free public-repository Git-LFS A/B check"
   fi
 
-  if echo "$probe_block" | grep -qF 'env -u NIX_USER_CONF_FILES nix eval'; then
-    pass "$probe_job runs the A/B check with no netrc and no access token in scope"
+  # The A/B check is credential-free by CONSTRUCTION, and the construction has
+  # to be additive. `env -u NIX_USER_CONF_FILES` was the original attempt and it
+  # did the OPPOSITE of what it claimed: unsetting the variable does not take
+  # Nix's user configuration out of scope, it makes Nix fall back to its DEFAULT
+  # user-config list, whose first entry is $HOME/.config/nix/nix.conf — the file
+  # earlier revisions of this repository poisoned with netrc-file = /tmp/netrc
+  # on self-hosted runners. Nix then presented a stale token to a PUBLIC
+  # repository and was answered 401 Bad credentials.
+  if printf '%s\n' "$probe_block" | awk '!/^[[:space:]]*#/' | grep -qF 'env -u NIX_USER_CONF_FILES'; then
+    fail "$probe_job isolates the A/B check by UNSETTING NIX_USER_CONF_FILES, which restores Nix's default user-config list and reads the host's own nix.conf"
   else
-    fail "$probe_job lets job credentials influence the credential-free A/B check"
+    pass "$probe_job does not treat unsetting NIX_USER_CONF_FILES as isolation"
+  fi
+
+  if echo "$probe_block" | grep -qF 'NIX_USER_CONF_FILES="$empty_nix_conf" nix eval'; then
+    pass "$probe_job points Nix at an EMPTY user configuration, replacing the default list rather than restoring it"
+  else
+    fail "$probe_job does not point Nix at an empty user configuration for the A/B check"
+  fi
+
+  # A command-line --option outranks every configuration file, including the
+  # SYSTEM one. Without it, /etc/nix/nix.conf's netrc-file still reaches this
+  # check — which is exactly how dell-foo's stale system netrc broke it.
+  if echo "$probe_block" | grep -qF -e '--option netrc-file "$empty_netrc"'; then
+    pass "$probe_job overrides netrc-file on the command line, so no configuration file can supply a credential"
+  else
+    fail "$probe_job does not override netrc-file, so the system nix.conf can still hand it a credential"
+  fi
+
+  if echo "$probe_block" | grep -qF -e '--option access-tokens ""'; then
+    pass "$probe_job clears access-tokens for the A/B check"
+  else
+    fail "$probe_job leaves access-tokens in scope for a check that must carry no credential"
+  fi
+
+  for empty_isolation_file in ': > "$empty_nix_conf"' ': > "$empty_netrc"'; do
+    if echo "$probe_block" | grep -qF "$empty_isolation_file"; then
+      pass "$probe_job creates the isolation file it points Nix at: $empty_isolation_file"
+    else
+      fail "$probe_job points Nix at an isolation file it never creates: $empty_isolation_file"
+    fi
+  done
+
+  for isolation_file_path in 'empty_nix_conf="$RUNNER_TEMP/credential-free-nix.conf"' 'empty_netrc="$RUNNER_TEMP/credential-free-netrc"'; do
+    if echo "$probe_block" | grep -qF "$isolation_file_path"; then
+      pass "$probe_job keeps its isolation file job-scoped under RUNNER_TEMP: $isolation_file_path"
+    else
+      fail "$probe_job does not keep its isolation file under RUNNER_TEMP: $isolation_file_path"
+    fi
+  done
+
+  # A request carrying no credential cannot be rejected for its credential, so a
+  # 401 means host state defeated the isolation and no result in the run means
+  # anything. It must never fall through to the generic no-phrase-matched red,
+  # which reads as an endpoint-discovery problem.
+  if echo "$probe_block" | grep -qF '::error::401 Bad credentials from a check that carries no credential'; then
+    pass "$probe_job reports a 401 as defeated isolation rather than as an endpoint result"
+  else
+    fail "$probe_job does not distinguish a 401 caused by leaked host credentials from an endpoint-discovery failure"
   fi
 
   if echo "$probe_block" | grep -qF 'HTTP 403 (LFS budget exceeded) is the expected SUCCESS signal'; then
@@ -1445,6 +1500,61 @@ if [ "$extra_header_settings" -ne 0 ]; then
   fail "workflow sets git config --global http.extraHeader (regression)"
 else
   pass "workflow does not set git config --global http.extraHeader"
+fi
+
+# --- Regression guard: the five persistent credential artifacts stay dead ---
+#
+# Earlier revisions of this repository wrote five credential artifacts and
+# removed none of them. HOME and /tmp persist between jobs on a self-hosted
+# runner, so a dead installation token was found in plaintext in a runner
+# user's HOME hours after its job ended, and every later job — including jobs
+# that asked for no organization access at all — picked it up and was answered
+# 401 Bad credentials even by PUBLIC repositories. No surface may write any of
+# them again. auth/authenticate.sh names them only to remove them, which the
+# setup-action-structure suite asserts separately.
+
+AUTH_SCRIPT="$REPO_ROOT/auth/authenticate.sh"
+AUTH_ACTION="$REPO_ROOT/auth/action.yml"
+
+legacy_emissions=(
+  '> "${HOME}/.netrc"'
+  '> "${HOME}/.git-credentials"'
+  '> /tmp/netrc'
+  'git config --global credential.helper store'
+  "netrc-file = /tmp/netrc\\n"
+)
+for legacy_surface in "$WORKFLOW" "$SETUP_ACTION" "$AUTH_ACTION" "$AUTH_SCRIPT" "$VALIDATE"; do
+  legacy_surface_label="${legacy_surface#"$REPO_ROOT"/}"
+  for legacy_emission in "${legacy_emissions[@]}"; do
+    if grep -qF -e "$legacy_emission" "$legacy_surface"; then
+      fail "$legacy_surface_label writes a persistent credential artifact again: $legacy_emission"
+    else
+      pass "$legacy_surface_label does not write the persistent credential artifact: $legacy_emission"
+    fi
+  done
+done
+
+# The smoke job is the only place this is checked on a REAL runner, so it has to
+# state the leftovers are gone rather than merely that new files are job-scoped.
+smoke_block="$(extract_validate_job setup-composite-smoke)"
+
+smoke_leftover_checks=(
+  'test ! -e /tmp/netrc'
+  '"$HOME/.netrc still carries a login x-access-token entry"'
+  '"$HOME/.git-credentials still carries an x-access-token credential"'
+)
+for smoke_leftover_check in "${smoke_leftover_checks[@]}"; do
+  if echo "$smoke_block" | grep -qF -e "$smoke_leftover_check"; then
+    pass "the setup composite smoke job proves this leftover is gone on a real runner: $smoke_leftover_check"
+  else
+    fail "the setup composite smoke job does not prove this leftover is gone: $smoke_leftover_check"
+  fi
+done
+
+if echo "$smoke_block" | grep -qF "grep -qE '^[[:space:]]*(extra-)?access-tokens|^[[:space:]]*netrc-file'"; then
+  pass "the setup composite smoke job proves the user nix.conf carries no job credential settings"
+else
+  fail "the setup composite smoke job does not check the user nix.conf for job credential settings"
 fi
 
 # --- Summary ---
