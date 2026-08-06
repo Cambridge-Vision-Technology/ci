@@ -1,0 +1,13 @@
+name: auto-merge-automated
+
+on:
+  check_suite:
+    types: [completed]
+
+jobs:
+  auto-merge:
+    if: github.event.check_suite.conclusion == 'success'
+    uses: Cambridge-Vision-Technology/maintenance/.github/workflows/auto-merge.yml@main
+    secrets:
+      AUTO_UPDATE_APP_ID: ${{ secrets.AUTO_UPDATE_APP_ID }}
+      AUTO_UPDATE_APP_PRIVATE_KEY: ${{ secrets.AUTO_UPDATE_APP_PRIVATE_KEY }}
