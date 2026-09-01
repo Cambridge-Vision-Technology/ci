@@ -8,8 +8,8 @@ set -euo pipefail
 #   auth/action.yml        the standalone organization read access action
 #   auth/authenticate.sh   the single implementation that writes credentials
 #
-# Pattern modelled after tests/workflow-structure/test.sh — pure shell, no
-# YAML parser, structural grep + line-bounded block extraction.
+# Pattern modelled after tests/workflow-structure/test.sh — yq for executable
+# uses scalars, with shell assertions and line-bounded block extraction.
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ACTION="$REPO_ROOT/setup/action.yml"
@@ -36,6 +36,109 @@ count_occurrences() {
 
 line_of() {
   awk -v needle="$1" 'index($0, needle) { print NR; exit }' "$2"
+}
+
+executable_ssh_agent_references() {
+  yq -r '
+    explode(.) |
+      [.jobs[]?.uses, .jobs[]?.steps[]?.uses, .runs.steps[]?.uses] |
+      .[] |
+      select(tag == "!!str" and (downcase | test("^webfactory/ssh-agent@"))) |
+      sub("^[^@]+@"; "")
+  ' "$1"
+}
+
+validate_ssh_agent_references() {
+  local workflow="$1"
+  local setup="$2"
+  local workflow_label="$3"
+  local setup_label="$4"
+  local workflow_references
+  local setup_references
+  local workflow_reference_count
+  local setup_reference_count
+  local invalid=0
+
+  workflow_references="$(executable_ssh_agent_references "$workflow")"
+  setup_references="$(executable_ssh_agent_references "$setup")"
+  workflow_reference_count="$(printf '%s\n' "$workflow_references" | awk 'NF { count++ } END { print count + 0 }')"
+  setup_reference_count="$(printf '%s\n' "$setup_references" | awk 'NF { count++ } END { print count + 0 }')"
+
+  if [ "$workflow_reference_count" -ne 1 ]; then
+    printf '%s\n' "$workflow_label has $workflow_reference_count executable webfactory/ssh-agent references, expected exactly 1" >&2
+    invalid=1
+  fi
+
+  if [ "$setup_reference_count" -ne 1 ]; then
+    printf '%s\n' "$setup_label has $setup_reference_count executable webfactory/ssh-agent references, expected exactly 1" >&2
+    invalid=1
+  fi
+
+  if [[ ! "$workflow_references" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    printf '%s\n' "webfactory/ssh-agent reference '$workflow_references' in $workflow_label is not a full 40-character commit SHA" >&2
+    invalid=1
+  fi
+
+  if [[ ! "$setup_references" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    printf '%s\n' "webfactory/ssh-agent reference '$setup_references' in $setup_label is not a full 40-character commit SHA" >&2
+    invalid=1
+  fi
+
+  if [ "$workflow_reference_count" -eq 1 ] &&
+    [ "$setup_reference_count" -eq 1 ] &&
+    [ "$workflow_references" != "$setup_references" ]; then
+    printf '%s\n' "webfactory/ssh-agent references differ between $workflow_label and $setup_label" >&2
+    invalid=1
+  fi
+
+  [ "$invalid" -eq 0 ]
+}
+
+write_workflow_ssh_agent_fixture() {
+  local fixture="$1"
+  local reference
+  shift
+
+  printf '%s\n' 'jobs:' '  test:' '    steps:' > "$fixture"
+  for reference in "$@"; do
+    printf '      - uses: %s\n' "$reference" >> "$fixture"
+  done
+}
+
+write_setup_ssh_agent_fixture() {
+  local fixture="$1"
+  local reference
+  shift
+
+  printf '%s\n' 'runs:' '  using: composite' '  steps:' > "$fixture"
+  for reference in "$@"; do
+    printf '    - uses: %s\n' "$reference" >> "$fixture"
+  done
+}
+
+assert_invalid_ssh_agent_fixture() {
+  local name="$1"
+  local expected_diagnostic="$2"
+  local output
+
+  if output="$(validate_ssh_agent_references "$SSH_AGENT_FIXTURE_WORKFLOW" "$SSH_AGENT_FIXTURE_SETUP" 'workflow fixture' 'setup fixture' 2>&1)"; then
+    fail "$name unexpectedly succeeded"
+  elif printf '%s\n' "$output" | grep -qFx "$expected_diagnostic"; then
+    pass "$name fails with its intended diagnostic"
+  else
+    fail "$name did not emit its intended diagnostic: $expected_diagnostic; got: $output"
+  fi
+}
+
+assert_valid_ssh_agent_fixture() {
+  local name="$1"
+  local output
+
+  if output="$(validate_ssh_agent_references "$SSH_AGENT_FIXTURE_WORKFLOW" "$SSH_AGENT_FIXTURE_SETUP" 'workflow fixture' 'setup fixture' 2>&1)"; then
+    pass "$name succeeds"
+  else
+    fail "$name failed: $output"
+  fi
 }
 
 # Extracts the minimum Nix version guard body from any surface. Handles both
@@ -1079,6 +1182,141 @@ else
 fi
 
 # --- ssh-agent step is gated on enable-ssh-agent input ---
+
+SSH_AGENT_PIN='e83874834305fe9a4a2997156cb26c5de65a8555'
+SSH_AGENT_OTHER_PIN='dc588b651fe13675774614f8e6a936a468676387'
+SSH_AGENT_FIXTURE_DIRECTORY="$(mktemp -d)"
+SSH_AGENT_FIXTURE_WORKFLOW="$SSH_AGENT_FIXTURE_DIRECTORY/workflow.yml"
+SSH_AGENT_FIXTURE_SETUP="$SSH_AGENT_FIXTURE_DIRECTORY/action.yml"
+trap 'rm -rf "$SSH_AGENT_FIXTURE_DIRECTORY"' EXIT
+
+write_workflow_ssh_agent_fixture "$SSH_AGENT_FIXTURE_WORKFLOW" "webfactory/ssh-agent@$SSH_AGENT_PIN"
+write_setup_ssh_agent_fixture "$SSH_AGENT_FIXTURE_SETUP" "webfactory/ssh-agent@$SSH_AGENT_PIN"
+assert_valid_ssh_agent_fixture "unquoted full commit references"
+
+write_workflow_ssh_agent_fixture "$SSH_AGENT_FIXTURE_WORKFLOW" "webfactory/ssh-agent@v0.10.0"
+write_setup_ssh_agent_fixture "$SSH_AGENT_FIXTURE_SETUP" "webfactory/ssh-agent@$SSH_AGENT_PIN"
+assert_invalid_ssh_agent_fixture \
+  "mutable tag reference" \
+  "webfactory/ssh-agent reference 'v0.10.0' in workflow fixture is not a full 40-character commit SHA"
+
+write_workflow_ssh_agent_fixture "$SSH_AGENT_FIXTURE_WORKFLOW" "webfactory/ssh-agent@$SSH_AGENT_PIN"
+write_setup_ssh_agent_fixture "$SSH_AGENT_FIXTURE_SETUP" "webfactory/ssh-agent@main"
+assert_invalid_ssh_agent_fixture \
+  "mutable branch reference" \
+  "webfactory/ssh-agent reference 'main' in setup fixture is not a full 40-character commit SHA"
+
+write_workflow_ssh_agent_fixture "$SSH_AGENT_FIXTURE_WORKFLOW" 'webfactory/ssh-agent@e838748'
+write_setup_ssh_agent_fixture "$SSH_AGENT_FIXTURE_SETUP" "webfactory/ssh-agent@$SSH_AGENT_PIN"
+assert_invalid_ssh_agent_fixture \
+  "abbreviated commit reference" \
+  "webfactory/ssh-agent reference 'e838748' in workflow fixture is not a full 40-character commit SHA"
+
+write_workflow_ssh_agent_fixture "$SSH_AGENT_FIXTURE_WORKFLOW"
+write_setup_ssh_agent_fixture "$SSH_AGENT_FIXTURE_SETUP" "webfactory/ssh-agent@$SSH_AGENT_PIN"
+assert_invalid_ssh_agent_fixture \
+  "missing workflow reference" \
+  "workflow fixture has 0 executable webfactory/ssh-agent references, expected exactly 1"
+
+write_workflow_ssh_agent_fixture "$SSH_AGENT_FIXTURE_WORKFLOW" "webfactory/ssh-agent@$SSH_AGENT_PIN"
+write_setup_ssh_agent_fixture "$SSH_AGENT_FIXTURE_SETUP"
+assert_invalid_ssh_agent_fixture \
+  "missing setup reference" \
+  "setup fixture has 0 executable webfactory/ssh-agent references, expected exactly 1"
+
+write_workflow_ssh_agent_fixture \
+  "$SSH_AGENT_FIXTURE_WORKFLOW" \
+  "webfactory/ssh-agent@$SSH_AGENT_PIN" \
+  "'webfactory/ssh-agent@$SSH_AGENT_PIN'"
+write_setup_ssh_agent_fixture "$SSH_AGENT_FIXTURE_SETUP" "webfactory/ssh-agent@$SSH_AGENT_PIN"
+assert_invalid_ssh_agent_fixture \
+  "quoted duplicate workflow reference" \
+  "workflow fixture has 2 executable webfactory/ssh-agent references, expected exactly 1"
+
+write_workflow_ssh_agent_fixture \
+  "$SSH_AGENT_FIXTURE_WORKFLOW" \
+  "webfactory/ssh-agent@$SSH_AGENT_PIN" \
+  "WebFactory/SSH-Agent@$SSH_AGENT_PIN"
+write_setup_ssh_agent_fixture "$SSH_AGENT_FIXTURE_SETUP" "webfactory/ssh-agent@$SSH_AGENT_PIN"
+assert_invalid_ssh_agent_fixture \
+  "mixed-case duplicate workflow reference" \
+  "workflow fixture has 2 executable webfactory/ssh-agent references, expected exactly 1"
+
+printf '%s\n' \
+  "ssh-agent-reference: &ssh-agent-reference webfactory/ssh-agent@$SSH_AGENT_PIN" \
+  'jobs:' \
+  '  test:' \
+  '    steps:' \
+  "      - uses: webfactory/ssh-agent@$SSH_AGENT_PIN" \
+  '      - uses: *ssh-agent-reference' > "$SSH_AGENT_FIXTURE_WORKFLOW"
+write_setup_ssh_agent_fixture "$SSH_AGENT_FIXTURE_SETUP" "webfactory/ssh-agent@$SSH_AGENT_PIN"
+assert_invalid_ssh_agent_fixture \
+  "YAML-alias duplicate workflow reference" \
+  "workflow fixture has 2 executable webfactory/ssh-agent references, expected exactly 1"
+
+write_workflow_ssh_agent_fixture "$SSH_AGENT_FIXTURE_WORKFLOW" "webfactory/ssh-agent@$SSH_AGENT_PIN"
+write_setup_ssh_agent_fixture "$SSH_AGENT_FIXTURE_SETUP" "webfactory/ssh-agent@$SSH_AGENT_OTHER_PIN"
+assert_invalid_ssh_agent_fixture \
+  "divergent full commit references" \
+  "webfactory/ssh-agent references differ between workflow fixture and setup fixture"
+
+write_workflow_ssh_agent_fixture "$SSH_AGENT_FIXTURE_WORKFLOW" "'webfactory/ssh-agent@$SSH_AGENT_PIN'"
+write_setup_ssh_agent_fixture "$SSH_AGENT_FIXTURE_SETUP" "\"webfactory/ssh-agent@$SSH_AGENT_PIN\""
+assert_valid_ssh_agent_fixture "single-quoted and double-quoted full commit references"
+
+printf '%s\n' \
+  'name: "Prose says uses: webfactory/ssh-agent@main"' \
+  '# uses: webfactory/ssh-agent@v0.10.0' \
+  'jobs:' \
+  '  test:' \
+  '    steps:' \
+  "      - uses: webfactory/ssh-agent@$SSH_AGENT_PIN" > "$SSH_AGENT_FIXTURE_WORKFLOW"
+printf '%s\n' \
+  'name: setup' \
+  'description: "Example prose says uses: webfactory/ssh-agent@main"' \
+  '# uses: webfactory/ssh-agent@v0.10.0' \
+  'runs:' \
+  '  using: composite' \
+  '  steps:' \
+  "    - uses: webfactory/ssh-agent@$SSH_AGENT_PIN" > "$SSH_AGENT_FIXTURE_SETUP"
+assert_valid_ssh_agent_fixture "misleading comments, descriptions, and prose"
+
+workflow_ssh_agent_references="$(executable_ssh_agent_references "$WORKFLOW")"
+setup_ssh_agent_references="$(executable_ssh_agent_references "$ACTION")"
+workflow_ssh_agent_reference_count="$(printf '%s\n' "$workflow_ssh_agent_references" | awk 'NF { count++ } END { print count + 0 }')"
+setup_ssh_agent_reference_count="$(printf '%s\n' "$setup_ssh_agent_references" | awk 'NF { count++ } END { print count + 0 }')"
+
+if [ "$workflow_ssh_agent_reference_count" -eq 1 ]; then
+  pass "exactly one executable webfactory/ssh-agent reference in .github/workflows/workflow.yml"
+else
+  fail ".github/workflows/workflow.yml has $workflow_ssh_agent_reference_count executable webfactory/ssh-agent references, expected exactly 1"
+fi
+
+if [ "$setup_ssh_agent_reference_count" -eq 1 ]; then
+  pass "exactly one executable webfactory/ssh-agent reference in setup/action.yml"
+else
+  fail "setup/action.yml has $setup_ssh_agent_reference_count executable webfactory/ssh-agent references, expected exactly 1"
+fi
+
+if [[ "$workflow_ssh_agent_references" =~ ^[0-9a-fA-F]{40}$ ]]; then
+  pass "webfactory/ssh-agent uses a full commit SHA in .github/workflows/workflow.yml"
+else
+  fail "webfactory/ssh-agent reference '$workflow_ssh_agent_references' in .github/workflows/workflow.yml is not a full 40-character commit SHA"
+fi
+
+if [[ "$setup_ssh_agent_references" =~ ^[0-9a-fA-F]{40}$ ]]; then
+  pass "webfactory/ssh-agent uses a full commit SHA in setup/action.yml"
+else
+  fail "webfactory/ssh-agent reference '$setup_ssh_agent_references' in setup/action.yml is not a full 40-character commit SHA"
+fi
+
+if [ "$workflow_ssh_agent_reference_count" -eq 1 ] &&
+  [ "$setup_ssh_agent_reference_count" -eq 1 ] &&
+  [ "$workflow_ssh_agent_references" = "$setup_ssh_agent_references" ]; then
+  pass "the reusable workflow and setup composite use the same webfactory/ssh-agent commit"
+else
+  fail "webfactory/ssh-agent references differ between the reusable workflow and setup composite"
+fi
 
 ssh_agent_window="$(grep -A4 -E 'name:[[:space:]]*Start ssh-agent' "$ACTION")"
 

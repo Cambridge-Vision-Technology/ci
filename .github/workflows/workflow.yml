@@ -323,7 +323,7 @@ jobs:
           else
             echo "ℹ️ No LFS files in repository"
           fi
-      - uses: webfactory/ssh-agent@v0.9.0
+      - uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555
         if: ${{ inputs.enable-ssh-agent }}
         with:
           ssh-private-key: ${{ secrets.ssh-private-key }}
