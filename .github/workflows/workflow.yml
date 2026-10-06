@@ -117,7 +117,22 @@ jobs:
   build:
     runs-on: ${{ matrix.systems.runner }}
     needs: inventory
-    timeout-minutes: 120
+    # 60, down from 120. The cap exists to stop one job monopolising a runner;
+    # at 120 it was too loose to do that. A maintenance darwin build occupied
+    # admin-mac-mini — the org's ONLY macOS runner — for 70 minutes against a
+    # 1-6 minute norm (26 min for the slowest legitimate run observed). It sat
+    # under the cap the whole time, so nothing intervened, and nix-shared's
+    # main CI plus every PR behind it queued for 70 minutes. nix-shared is a
+    # dependency of most repos, so a single slow darwin job stalls much of the
+    # org's CI.
+    #
+    # 60 leaves roughly 2x headroom over the slowest legitimate run seen. The
+    # trade-off is real though: a genuinely cold-cache darwin build of a large
+    # closure could exceed it and fail where it used to pass. If that happens,
+    # the right response is more darwin capacity rather than raising this back
+    # — a cap this high is only tolerable because there is one Mac, and that is
+    # the thing actually worth fixing.
+    timeout-minutes: 60
     strategy:
       fail-fast: ${{ inputs.fail-fast }}
       matrix:
