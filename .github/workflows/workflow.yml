@@ -467,6 +467,17 @@ jobs:
           WINDOW_START: ${{ steps.diagnostics-start.outputs.query }}
           WINDOW_END: ${{ steps.diagnostics-end.outputs.query }}
         run: /usr/bin/journalctl --dmesg --since="$WINDOW_START UTC" --until="$WINDOW_END UTC" --grep='out of memory|oom-kill|killed process|memory pressure' --lines=200 --utc --output=short-iso-precise --no-pager > "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}/linux-kernel.stdout.txt" 2> "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}/linux-kernel.stderr.txt"
+      - name: Query scoped Linux kernel ring records
+        id: diagnostics-linux-ring
+        if: ${{ !cancelled() && inputs.enable-failure-diagnostics && runner.environment == 'github-hosted' && runner.os == 'Linux' && steps.diagnostics-directory.outcome == 'success' && steps.diagnostics-directory.outputs.name != '' && steps.diagnostics-start.outcome == 'success' && steps.diagnostics-end.outcome == 'success' && steps.diagnostics-start.outputs.query != '' && steps.diagnostics-end.outputs.query != '' && (steps.flake-check.outcome == 'failure' || steps.devshells.outcome == 'failure') }}
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        env:
+          TZ: UTC
+          WINDOW_START: ${{ steps.diagnostics-start.outputs.query }}
+          WINDOW_END: ${{ steps.diagnostics-end.outputs.query }}
+        run: exec /usr/bin/sudo --non-interactive --preserve-env=TZ -- /usr/bin/dmesg --kernel --facility=kern --level=warn,err,crit,alert,emerg --since="$WINDOW_START" --until="$WINDOW_END" --time-format=iso --color=never --nopager > "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}/linux-ring.stdout.txt" 2> "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}/linux-ring.stderr.txt"
       - name: Query scoped Darwin kernel memory and termination records
         id: diagnostics-darwin-records
         if: ${{ !cancelled() && inputs.enable-failure-diagnostics && runner.environment == 'github-hosted' && runner.os == 'macOS' && steps.diagnostics-directory.outcome == 'success' && steps.diagnostics-directory.outputs.name != '' && steps.diagnostics-start.outcome == 'success' && steps.diagnostics-end.outcome == 'success' && steps.diagnostics-start.outputs.query != '' && steps.diagnostics-end.outputs.query != '' && (steps.flake-check.outcome == 'failure' || steps.devshells.outcome == 'failure') }}
@@ -502,6 +513,9 @@ jobs:
           DIAGNOSTICS_LINUX_PROCESSES_OUTCOME: ${{ steps.diagnostics-linux-processes.outcome }}
           DIAGNOSTICS_DARWIN_PROCESSES_OUTCOME: ${{ steps.diagnostics-darwin-processes.outcome }}
           DIAGNOSTICS_LINUX_RECORDS_OUTCOME: ${{ steps.diagnostics-linux-records.outcome }}
+          DIAGNOSTICS_LINUX_RING_OUTCOME: ${{ steps.diagnostics-linux-ring.outcome }}
+          DIAGNOSTICS_RING_WINDOW_START: ${{ steps.diagnostics-start.outputs.query }}
+          DIAGNOSTICS_RING_WINDOW_END: ${{ steps.diagnostics-end.outputs.query }}
           DIAGNOSTICS_DARWIN_RECORDS_OUTCOME: ${{ steps.diagnostics-darwin-records.outcome }}
         run: |
           /usr/bin/printf '%s\n' \
@@ -527,6 +541,16 @@ jobs:
             "linux_processes_outcome=$DIAGNOSTICS_LINUX_PROCESSES_OUTCOME" \
             "darwin_processes_outcome=$DIAGNOSTICS_DARWIN_PROCESSES_OUTCOME" \
             "linux_records_outcome=$DIAGNOSTICS_LINUX_RECORDS_OUTCOME" \
+            "linux_ring_outcome=$DIAGNOSTICS_LINUX_RING_OUTCOME" \
+            'linux_ring_source=util-linux dmesg kernel ring buffer, separate from the journal source' \
+            'linux_ring_invocation=/usr/bin/sudo --non-interactive --preserve-env=TZ -- /usr/bin/dmesg --kernel --facility=kern --level=warn,err,crit,alert,emerg --since=<linux_ring_window_start_utc> --until=<linux_ring_window_end_utc> --time-format=iso --color=never --nopager' \
+            "linux_ring_window_start_utc=$DIAGNOSTICS_RING_WINDOW_START" \
+            "linux_ring_window_end_utc=$DIAGNOSTICS_RING_WINDOW_END" \
+            'linux_ring_time_input=YYYY-MM-DD HH:MM:SS interpreted under literal TZ=UTC; no UTC suffix; only TZ is requested for sudo environment preservation' \
+            'linux_ring_clock=boot-relative record times converted with current wall/boot/monotonic offsets; clock changes and suspend/resume can misalign the window; native since/until endpoints are exclusive' \
+            'linux_ring_runtime_limit=1 minute; missing executable, denied sudo/TZ preservation or kernel access remains raw output and failed outcome without fallback' \
+            'linux_ring_limits=no enforced record count, stdout/stderr byte or aggregate storage cap; ring wrap/clear can lose records; no completeness or causal diagnosis claim' \
+            'linux_diagnostic_timeout_ceiling=11 minutes within the existing 60-minute job cap, not a resource reservation' \
             "darwin_records_outcome=$DIAGNOSTICS_DARWIN_RECORDS_OUTCOME" \
             'window_resolution=one-second UTC clock samples; one-second sleep before the failure end sample brackets completed checks if successful' \
             'window_limits=clock changes, failed boundary sleep, log access and ingestion delay can leave gaps; no completeness claim' \
@@ -568,6 +592,8 @@ jobs:
             ${{ runner.temp }}/name=${{ steps.diagnostics-directory.outputs.name }}/darwin-processes.stderr.txt
             ${{ runner.temp }}/name=${{ steps.diagnostics-directory.outputs.name }}/linux-kernel.stdout.txt
             ${{ runner.temp }}/name=${{ steps.diagnostics-directory.outputs.name }}/linux-kernel.stderr.txt
+            ${{ runner.temp }}/name=${{ steps.diagnostics-directory.outputs.name }}/linux-ring.stdout.txt
+            ${{ runner.temp }}/name=${{ steps.diagnostics-directory.outputs.name }}/linux-ring.stderr.txt
             ${{ runner.temp }}/name=${{ steps.diagnostics-directory.outputs.name }}/darwin-kernel.stdout.txt
             ${{ runner.temp }}/name=${{ steps.diagnostics-directory.outputs.name }}/darwin-kernel.stderr.txt
           retention-days: 3
