@@ -12,6 +12,12 @@ on:
           x86_64-linux and macos-arm64-nix-darwin.
         type: boolean
         default: false
+      run-failure-diagnostics:
+        description: |
+          Run deliberate red failure-diagnostics jobs with public fixtures on
+          GitHub-hosted Linux and macOS runners only. Off by default.
+        type: boolean
+        default: false
 
 # The runner reads FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 while it prepares a
 # JavaScript action, so only a workflow-level env takes effect; a job-level or
@@ -867,3 +873,41 @@ jobs:
             exit 1
           fi
           echo "Scanned $scanned probe job logs in full: no installation token and no private key in any of them."
+
+  failure-diagnostics-enabled-flake:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run-failure-diagnostics }}
+    uses: ./.github/workflows/workflow.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      directory: ./tests/failure-diagnostics/fixture
+      runner-map: '{"x86_64-linux": "ubuntu-latest", "aarch64-darwin": "macos-latest"}'
+      fail-fast: false
+      check-dev-shells: false
+      enable-failure-diagnostics: true
+
+  failure-diagnostics-default-flake:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run-failure-diagnostics }}
+    uses: ./.github/workflows/workflow.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      directory: ./tests/failure-diagnostics/fixture
+      runner-map: '{"x86_64-linux": "ubuntu-latest", "aarch64-darwin": "macos-latest"}'
+      fail-fast: false
+      check-dev-shells: false
+
+  failure-diagnostics-enabled-dev-shell:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run-failure-diagnostics }}
+    uses: ./.github/workflows/workflow.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      directory: ./tests/failure-diagnostics/dev-shell-fixture
+      runner-map: '{"x86_64-linux": "ubuntu-latest", "aarch64-darwin": "macos-latest"}'
+      fail-fast: false
+      check-dev-shells: true
+      enable-failure-diagnostics: true
