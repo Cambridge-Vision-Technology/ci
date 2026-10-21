@@ -48,6 +48,7 @@
               ./.github/workflows/validate.yml
               ./tests/failure-diagnostics/fixture/flake.lock
               ./tests/failure-diagnostics/dev-shell-fixture/flake.lock
+              ./tests/failure-diagnostics/single-build-job.schema.json
             ];
           };
           formatNixSource = lib.fileset.toSource {
@@ -87,6 +88,14 @@
               ./tests/org-read-probe/flake.nix
             ];
           };
+          singleBuildJobContractSource = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              ./.github/workflows/workflow.yml
+              ./.github/workflows/validate.yml
+              ./tests/failure-diagnostics/single-build-job.schema.json
+            ];
+          };
         in
         {
           actionlint =
@@ -105,7 +114,7 @@
               }
               ''
                 set -euo pipefail
-                exec prettier --check ${formatSelectedSource}/.github/workflows/workflow.yml ${formatSelectedSource}/.github/workflows/validate.yml ${formatSelectedSource}/tests/failure-diagnostics/fixture/flake.lock ${formatSelectedSource}/tests/failure-diagnostics/dev-shell-fixture/flake.lock > "$out"
+                exec prettier --check ${formatSelectedSource}/.github/workflows/workflow.yml ${formatSelectedSource}/.github/workflows/validate.yml ${formatSelectedSource}/tests/failure-diagnostics/fixture/flake.lock ${formatSelectedSource}/tests/failure-diagnostics/dev-shell-fixture/flake.lock ${formatSelectedSource}/tests/failure-diagnostics/single-build-job.schema.json > "$out"
               '';
           format-nix =
             pkgs.runCommand "format-nix"
@@ -161,6 +170,15 @@
               ''
                 set -euo pipefail
                 exec bash ${workflowStructureSource}/tests/workflow-structure/test.sh > "$out"
+              '';
+          single-build-job-contract =
+            pkgs.runCommand "single-build-job-contract"
+              {
+                nativeBuildInputs = [ pkgs.check-jsonschema ];
+              }
+              ''
+                set -euo pipefail
+                exec check-jsonschema --schemafile ${singleBuildJobContractSource}/tests/failure-diagnostics/single-build-job.schema.json ${singleBuildJobContractSource}/.github/workflows/workflow.yml ${singleBuildJobContractSource}/.github/workflows/validate.yml > "$out"
               '';
         }
       );

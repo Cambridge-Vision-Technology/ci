@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["on", "jobs"],
+  "if": {
+    "properties": {
+      "on": { "required": ["workflow_call"] }
+    }
+  },
+  "then": { "$ref": "#/$defs/reusableWorkflow" },
+  "else": { "$ref": "#/$defs/validationWorkflow" },
+  "$defs": {
+    "optionalFalseBoolean": {
+      "type": "object",
+      "required": ["type", "required", "default"],
+      "properties": {
+        "type": { "const": "boolean" },
+        "required": { "const": false },
+        "default": { "const": false }
+      }
+    },
+    "primaryIdentity": {
+      "anyOf": [
+        {
+          "required": ["id"],
+          "properties": { "id": { "const": "flake-check" } }
+        },
+        {
+          "required": ["name"],
+          "properties": { "name": { "const": "nix flake check" } }
+        }
+      ]
+    },
+    "reusableWorkflow": {
+      "properties": {
+        "on": {
+          "type": "object",
+          "properties": {
+            "workflow_call": {
+              "type": "object",
+              "required": ["inputs"],
+              "properties": {
+                "inputs": {
+                  "type": "object",
+                  "required": [
+                    "single-build-job",
+                    "check-dev-shells",
+                    "enable-failure-diagnostics"
+                  ],
+                  "properties": {
+                    "single-build-job": {
+                      "$ref": "#/$defs/optionalFalseBoolean"
+                    },
+                    "check-dev-shells": {
+                      "type": "object",
+                      "required": ["type", "required", "default"],
+                      "properties": {
+                        "type": { "const": "boolean" },
+                        "required": { "const": false },
+                        "default": { "const": true }
+                      }
+                    },
+                    "enable-failure-diagnostics": {
+                      "$ref": "#/$defs/optionalFalseBoolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "jobs": {
+          "type": "object",
+          "required": ["build"],
+          "properties": {
+            "build": {
+              "type": "object",
+              "required": ["steps"],
+              "properties": {
+                "steps": {
+                  "type": "array",
+                  "contains": { "$ref": "#/$defs/primaryIdentity" },
+                  "minContains": 1,
+                  "maxContains": 1,
+                  "items": {
+                    "if": { "$ref": "#/$defs/primaryIdentity" },
+                    "then": {
+                      "required": ["name", "id", "working-directory", "run"],
+                      "properties": {
+                        "name": { "const": "nix flake check" },
+                        "id": { "const": "flake-check" },
+                        "working-directory": {
+                          "const": "${{ inputs.directory }}"
+                        },
+                        "run": {
+                          "const": "${{ inputs.single-build-job && 'nix flake check --verbose --max-jobs 1' || 'nix flake check --verbose' }}"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "hostedCaller": {
+      "type": "object",
+      "required": ["uses", "permissions", "with"],
+      "properties": {
+        "uses": { "const": "./.github/workflows/workflow.yml" },
+        "permissions": {
+          "type": "object",
+          "required": ["contents", "id-token"],
+          "properties": {
+            "contents": { "const": "read" },
+            "id-token": { "const": "write" }
+          }
+        },
+        "with": {
+          "type": "object",
+          "required": ["directory", "runner-map"],
+          "properties": {
+            "runner-map": {
+              "const": "{\"x86_64-linux\": \"ubuntu-latest\", \"aarch64-darwin\": \"macos-latest\"}"
+            }
+          }
+        }
+      }
+    },
+    "smokeCaller": {
+      "$ref": "#/$defs/hostedCaller",
+      "not": { "required": ["if"] },
+      "properties": {
+        "with": {
+          "properties": {
+            "directory": { "const": "./tests/smoke" }
+          },
+          "not": {
+            "anyOf": [
+              { "required": ["check-dev-shells"] },
+              { "required": ["enable-failure-diagnostics"] }
+            ]
+          }
+        }
+      }
+    },
+    "enabledNegativeCaller": {
+      "$ref": "#/$defs/hostedCaller",
+      "required": ["if"],
+      "properties": {
+        "if": {
+          "const": "${{ github.event_name == 'workflow_dispatch' && inputs.run-failure-diagnostics }}"
+        },
+        "with": {
+          "required": [
+            "single-build-job",
+            "enable-failure-diagnostics",
+            "fail-fast",
+            "check-dev-shells"
+          ],
+          "properties": {
+            "single-build-job": { "const": true },
+            "enable-failure-diagnostics": { "const": true },
+            "fail-fast": { "const": false }
+          }
+        }
+      }
+    },
+    "validationWorkflow": {
+      "properties": {
+        "on": { "type": "object", "required": ["pull_request"] },
+        "jobs": {
+          "type": "object",
+          "required": [
+            "ci",
+            "single-build-job-smoke",
+            "failure-diagnostics-enabled-flake",
+            "failure-diagnostics-default-flake",
+            "failure-diagnostics-enabled-dev-shell"
+          ],
+          "properties": {
+            "ci": {
+              "$ref": "#/$defs/smokeCaller",
+              "properties": {
+                "with": { "not": { "required": ["single-build-job"] } }
+              }
+            },
+            "single-build-job-smoke": {
+              "$ref": "#/$defs/smokeCaller",
+              "properties": {
+                "with": {
+                  "required": ["single-build-job"],
+                  "properties": { "single-build-job": { "const": true } }
+                }
+              }
+            },
+            "failure-diagnostics-enabled-flake": {
+              "$ref": "#/$defs/enabledNegativeCaller",
+              "properties": {
+                "with": {
+                  "properties": {
+                    "directory": {
+                      "const": "./tests/failure-diagnostics/fixture"
+                    },
+                    "check-dev-shells": { "const": false }
+                  }
+                }
+              }
+            },
+            "failure-diagnostics-enabled-dev-shell": {
+              "$ref": "#/$defs/enabledNegativeCaller",
+              "properties": {
+                "with": {
+                  "properties": {
+                    "directory": {
+                      "const": "./tests/failure-diagnostics/dev-shell-fixture"
+                    },
+                    "check-dev-shells": { "const": true }
+                  }
+                }
+              }
+            },
+            "failure-diagnostics-default-flake": {
+              "$ref": "#/$defs/hostedCaller",
+              "properties": {
+                "with": { "not": { "required": ["single-build-job"] } }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
