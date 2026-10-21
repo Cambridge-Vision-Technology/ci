@@ -369,7 +369,7 @@ jobs:
         timeout-minutes: 1
         shell: bash
         working-directory: ${{ runner.temp }}
-        run: /usr/bin/mktemp -d 'name=failure-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-XXXXXXXX' >> "$GITHUB_OUTPUT"
+        run: mktemp -d 'name=failure-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-XXXXXXXX' >> "$GITHUB_OUTPUT"
       - name: Capture diagnostics window start UTC
         id: diagnostics-start
         if: ${{ inputs.enable-failure-diagnostics && runner.environment == 'github-hosted' && (runner.os == 'Linux' || runner.os == 'macOS') }}
@@ -551,7 +551,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 1
         shell: bash
-        run: /usr/bin/printf '%s\n' 'records=unsupported-records' 'policy=host records require runner.environment github-hosted and runner.os Linux or macOS; no host query was requested' > "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}/manifest.txt"
+        run: printf '%s\n' 'records=unsupported-records' 'policy=host records require runner.environment github-hosted and runner.os Linux or macOS; no host query was requested' > "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}/manifest.txt"
       - name: Upload allowlisted failure diagnostics
         id: diagnostics-upload
         if: ${{ !cancelled() && inputs.enable-failure-diagnostics && steps.diagnostics-directory.outcome == 'success' && steps.diagnostics-directory.outputs.name != '' && (steps.flake-check.outcome == 'failure' || steps.devshells.outcome == 'failure') }}
@@ -580,7 +580,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 1
         shell: bash
-        run: /bin/rm -rf "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}"
+        run: rm -rf "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}"
 
   success:
     runs-on: ubuntu-latest
