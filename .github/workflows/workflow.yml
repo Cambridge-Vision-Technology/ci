@@ -88,6 +88,15 @@ on:
         required: false
         default: true
         type: boolean
+      enable-failure-diagnostics:
+        description: |
+          Retain same-job native diagnostics on flake or devShell failure for 3 days.
+          Host records require a GitHub-hosted Linux or macOS runner; other hosts
+          retain only an unsupported-records manifest. Native output has no byte cap;
+          macOS log output and process snapshots have no record-count cap.
+        required: false
+        default: false
+        type: boolean
 
     secrets:
       ssh-private-key:
@@ -353,11 +362,28 @@ jobs:
           } >> ~/.ssh/known_hosts
           echo "NIX_SSHOPTS=-o UserKnownHostsFile=$HOME/.ssh/known_hosts" >> "$GITHUB_ENV"
           echo "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=$HOME/.ssh/known_hosts" >> "$GITHUB_ENV"
+      - name: Create unique diagnostics directory with native name output
+        id: diagnostics-directory
+        if: ${{ inputs.enable-failure-diagnostics }}
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        run: /usr/bin/mktemp -d 'name=failure-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-XXXXXXXX' >> "$GITHUB_OUTPUT"
+      - name: Capture diagnostics window start UTC
+        id: diagnostics-start
+        if: ${{ inputs.enable-failure-diagnostics && runner.environment == 'github-hosted' && (runner.os == 'Linux' || runner.os == 'macOS') }}
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: /bin/date -u '+utc=%Y-%m-%dT%H:%M:%SZ%nquery=%Y-%m-%d %H:%M:%S' >> "$GITHUB_OUTPUT"
       - name: nix flake check
+        id: flake-check
         working-directory: ${{ inputs.directory }}
         run: nix flake check --verbose
       - name: Validate devShells
         if: ${{ inputs.check-dev-shells }}
+        id: devshells
         working-directory: ${{ inputs.directory }}
         run: |
           system="${{ matrix.systems.nix-system }}"
@@ -403,6 +429,158 @@ jobs:
             echo "::error::One or more devShells failed validation"
             exit 1
           fi
+      - name: Snapshot named Linux process identities and current RSS
+        id: diagnostics-linux-processes
+        if: ${{ !cancelled() && inputs.enable-failure-diagnostics && runner.environment == 'github-hosted' && runner.os == 'Linux' && steps.diagnostics-directory.outcome == 'success' && steps.diagnostics-directory.outputs.name != '' && steps.diagnostics-start.outcome == 'success' && (steps.flake-check.outcome == 'failure' || steps.devshells.outcome == 'failure') }}
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: /bin/ps -ww -C nix,nix-daemon,nix-build,nix-store,nix-instantiate,cp,coreutils -o pid,ppid,comm,rss,vsz,etimes,exe > "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}/linux-processes.stdout.txt" 2> "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}/linux-processes.stderr.txt"
+      - name: Snapshot named Darwin process identities without arguments
+        id: diagnostics-darwin-processes
+        if: ${{ !cancelled() && inputs.enable-failure-diagnostics && runner.environment == 'github-hosted' && runner.os == 'macOS' && steps.diagnostics-directory.outcome == 'success' && steps.diagnostics-directory.outputs.name != '' && steps.diagnostics-start.outcome == 'success' && (steps.flake-check.outcome == 'failure' || steps.devshells.outcome == 'failure') }}
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: /usr/bin/pgrep -l -x 'nix|nix-daemon|nix-build|nix-store|nix-instantiate|cp|coreutils' > "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}/darwin-processes.stdout.txt" 2> "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}/darwin-processes.stderr.txt"
+      - name: Allow one second before sampling the failure window end
+        id: diagnostics-second-boundary
+        if: ${{ !cancelled() && inputs.enable-failure-diagnostics && runner.environment == 'github-hosted' && (runner.os == 'Linux' || runner.os == 'macOS') && (steps.flake-check.outcome == 'failure' || steps.devshells.outcome == 'failure') }}
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: /bin/sleep 1
+      - name: Capture diagnostics window end UTC
+        id: diagnostics-end
+        if: ${{ !cancelled() && inputs.enable-failure-diagnostics && runner.environment == 'github-hosted' && (runner.os == 'Linux' || runner.os == 'macOS') && (steps.flake-check.outcome == 'success' || steps.flake-check.outcome == 'failure') }}
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: /bin/date -u '+utc=%Y-%m-%dT%H:%M:%SZ%nquery=%Y-%m-%d %H:%M:%S' >> "$GITHUB_OUTPUT"
+      - name: Query scoped Linux kernel memory and termination records
+        id: diagnostics-linux-records
+        if: ${{ !cancelled() && inputs.enable-failure-diagnostics && runner.environment == 'github-hosted' && runner.os == 'Linux' && steps.diagnostics-directory.outcome == 'success' && steps.diagnostics-directory.outputs.name != '' && steps.diagnostics-start.outcome == 'success' && steps.diagnostics-end.outcome == 'success' && steps.diagnostics-start.outputs.query != '' && steps.diagnostics-end.outputs.query != '' && (steps.flake-check.outcome == 'failure' || steps.devshells.outcome == 'failure') }}
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        env:
+          WINDOW_START: ${{ steps.diagnostics-start.outputs.query }}
+          WINDOW_END: ${{ steps.diagnostics-end.outputs.query }}
+        run: /usr/bin/journalctl --dmesg --since="$WINDOW_START UTC" --until="$WINDOW_END UTC" --grep='out of memory|oom-kill|killed process|memory pressure' --lines=200 --utc --output=short-iso-precise --no-pager > "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}/linux-kernel.stdout.txt" 2> "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}/linux-kernel.stderr.txt"
+      - name: Query scoped Darwin kernel memory and termination records
+        id: diagnostics-darwin-records
+        if: ${{ !cancelled() && inputs.enable-failure-diagnostics && runner.environment == 'github-hosted' && runner.os == 'macOS' && steps.diagnostics-directory.outcome == 'success' && steps.diagnostics-directory.outputs.name != '' && steps.diagnostics-start.outcome == 'success' && steps.diagnostics-end.outcome == 'success' && steps.diagnostics-start.outputs.query != '' && steps.diagnostics-end.outputs.query != '' && (steps.flake-check.outcome == 'failure' || steps.devshells.outcome == 'failure') }}
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        env:
+          WINDOW_START: ${{ steps.diagnostics-start.outputs.query }}
+          WINDOW_END: ${{ steps.diagnostics-end.outputs.query }}
+        run: /usr/bin/log show --start "${WINDOW_START}+0000" --end "${WINDOW_END}+0000" --timezone UTC --style compact --no-pager --no-info --no-debug --predicate 'process == "kernel" AND (eventMessage CONTAINS[c] "memorystatus" OR eventMessage CONTAINS[c] "jetsam" OR eventMessage CONTAINS[c] "memory pressure" OR eventMessage CONTAINS[c] "out of memory" OR eventMessage CONTAINS[c] "killed process")' > "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}/darwin-kernel.stdout.txt" 2> "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}/darwin-kernel.stderr.txt"
+      - name: Write hosted failure diagnostics manifest
+        id: diagnostics-manifest
+        if: ${{ !cancelled() && inputs.enable-failure-diagnostics && runner.environment == 'github-hosted' && (runner.os == 'Linux' || runner.os == 'macOS') && steps.diagnostics-directory.outcome == 'success' && steps.diagnostics-directory.outputs.name != '' && (steps.flake-check.outcome == 'failure' || steps.devshells.outcome == 'failure') }}
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        env:
+          DIAGNOSTICS_REPOSITORY: ${{ github.repository }}
+          DIAGNOSTICS_SOURCE_SHA: ${{ github.sha }}
+          DIAGNOSTICS_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          DIAGNOSTICS_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          DIAGNOSTICS_SYSTEM: ${{ matrix.systems.nix-system }}
+          DIAGNOSTICS_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          DIAGNOSTICS_RUNNER_OS: ${{ runner.os }}
+          DIAGNOSTICS_WINDOW_START: ${{ steps.diagnostics-start.outputs.utc }}
+          DIAGNOSTICS_WINDOW_END: ${{ steps.diagnostics-end.outputs.utc }}
+          DIAGNOSTICS_DIRECTORY_OUTCOME: ${{ steps.diagnostics-directory.outcome }}
+          DIAGNOSTICS_START_OUTCOME: ${{ steps.diagnostics-start.outcome }}
+          DIAGNOSTICS_SECOND_BOUNDARY_OUTCOME: ${{ steps.diagnostics-second-boundary.outcome }}
+          DIAGNOSTICS_END_OUTCOME: ${{ steps.diagnostics-end.outcome }}
+          DIAGNOSTICS_FLAKE_OUTCOME: ${{ steps.flake-check.outcome }}
+          DIAGNOSTICS_DEVSHELLS_OUTCOME: ${{ steps.devshells.outcome }}
+          DIAGNOSTICS_LINUX_PROCESSES_OUTCOME: ${{ steps.diagnostics-linux-processes.outcome }}
+          DIAGNOSTICS_DARWIN_PROCESSES_OUTCOME: ${{ steps.diagnostics-darwin-processes.outcome }}
+          DIAGNOSTICS_LINUX_RECORDS_OUTCOME: ${{ steps.diagnostics-linux-records.outcome }}
+          DIAGNOSTICS_DARWIN_RECORDS_OUTCOME: ${{ steps.diagnostics-darwin-records.outcome }}
+        run: |
+          /usr/bin/printf '%s\n' \
+            'records=hosted-native-attempts' \
+            "repository=$DIAGNOSTICS_REPOSITORY" \
+            "source_sha=$DIAGNOSTICS_SOURCE_SHA" \
+            "workflow_repository=$DIAGNOSTICS_WORKFLOW_REPOSITORY" \
+            "workflow_sha=$DIAGNOSTICS_WORKFLOW_SHA" \
+            'run_id=${{ github.run_id }}' \
+            'run_attempt=${{ github.run_attempt }}' \
+            'directory_basename=name=${{ steps.diagnostics-directory.outputs.name }}' \
+            "system=$DIAGNOSTICS_SYSTEM" \
+            "runner_environment=$DIAGNOSTICS_RUNNER_ENVIRONMENT" \
+            "runner_os=$DIAGNOSTICS_RUNNER_OS" \
+            "window_start_utc=$DIAGNOSTICS_WINDOW_START" \
+            "window_end_utc=$DIAGNOSTICS_WINDOW_END" \
+            "directory_outcome=$DIAGNOSTICS_DIRECTORY_OUTCOME" \
+            "start_outcome=$DIAGNOSTICS_START_OUTCOME" \
+            "second_boundary_outcome=$DIAGNOSTICS_SECOND_BOUNDARY_OUTCOME" \
+            "end_outcome=$DIAGNOSTICS_END_OUTCOME" \
+            "flake_outcome=$DIAGNOSTICS_FLAKE_OUTCOME" \
+            "devshells_outcome=$DIAGNOSTICS_DEVSHELLS_OUTCOME" \
+            "linux_processes_outcome=$DIAGNOSTICS_LINUX_PROCESSES_OUTCOME" \
+            "darwin_processes_outcome=$DIAGNOSTICS_DARWIN_PROCESSES_OUTCOME" \
+            "linux_records_outcome=$DIAGNOSTICS_LINUX_RECORDS_OUTCOME" \
+            "darwin_records_outcome=$DIAGNOSTICS_DARWIN_RECORDS_OUTCOME" \
+            'window_resolution=one-second UTC clock samples; one-second sleep before the failure end sample brackets completed checks if successful' \
+            'window_limits=clock changes, failed boundary sleep, log access and ingestion delay can leave gaps; no completeness claim' \
+            'process_observation=one post-check snapshot inside the sampled window, not continuous observation' \
+            'linux_memory=current RSS and VSZ in KiB per named live process, not builder or cp peak' \
+            'darwin_memory=unavailable; pgrep provides names and PIDs, not name-selected RSS' \
+            'cp_executable_identity=Linux EXE only if cp or coreutils is live and accessible; unavailable otherwise and on Darwin' \
+            'linux_record_limit=200 most recent matching kernel records, newest first' \
+            'darwin_record_limit=unavailable; log show has no record-count option' \
+            'process_count_limit=unavailable; one finite named-process snapshot' \
+            'output_byte_limit=unavailable for stdout and stderr; timeout is not a byte cap' \
+            'aggregate_storage_limit=unavailable' \
+            'step_limits=1 minute per native step; 2 minutes for upload; existing job cap remains 60 minutes' \
+            'interpretation=raw native stdout/stderr and Actions outcomes only; no cause or missing/denied/empty classification' \
+            'later_outcomes=manifest, upload and cleanup remain in Actions step records, not this pre-upload manifest' \
+            'retention_days=3' \
+            'cleanup=exact owned directory removed after upload attempt or successful checks; runner temp cleanup is the backstop' \
+            > "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}/manifest.txt"
+      - name: Write unsupported host-records outcome
+        id: diagnostics-unsupported
+        if: ${{ !cancelled() && inputs.enable-failure-diagnostics && (runner.environment != 'github-hosted' || (runner.os != 'Linux' && runner.os != 'macOS')) && steps.diagnostics-directory.outcome == 'success' && steps.diagnostics-directory.outputs.name != '' && (steps.flake-check.outcome == 'failure' || steps.devshells.outcome == 'failure') }}
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: /usr/bin/printf '%s\n' 'records=unsupported-records' 'policy=host records require runner.environment github-hosted and runner.os Linux or macOS; no host query was requested' > "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}/manifest.txt"
+      - name: Upload allowlisted failure diagnostics
+        id: diagnostics-upload
+        if: ${{ !cancelled() && inputs.enable-failure-diagnostics && steps.diagnostics-directory.outcome == 'success' && steps.diagnostics-directory.outputs.name != '' && (steps.flake-check.outcome == 'failure' || steps.devshells.outcome == 'failure') }}
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.diagnostics-directory.outputs.name }}
+          path: |
+            ${{ runner.temp }}/name=${{ steps.diagnostics-directory.outputs.name }}/manifest.txt
+            ${{ runner.temp }}/name=${{ steps.diagnostics-directory.outputs.name }}/linux-processes.stdout.txt
+            ${{ runner.temp }}/name=${{ steps.diagnostics-directory.outputs.name }}/linux-processes.stderr.txt
+            ${{ runner.temp }}/name=${{ steps.diagnostics-directory.outputs.name }}/darwin-processes.stdout.txt
+            ${{ runner.temp }}/name=${{ steps.diagnostics-directory.outputs.name }}/darwin-processes.stderr.txt
+            ${{ runner.temp }}/name=${{ steps.diagnostics-directory.outputs.name }}/linux-kernel.stdout.txt
+            ${{ runner.temp }}/name=${{ steps.diagnostics-directory.outputs.name }}/linux-kernel.stderr.txt
+            ${{ runner.temp }}/name=${{ steps.diagnostics-directory.outputs.name }}/darwin-kernel.stdout.txt
+            ${{ runner.temp }}/name=${{ steps.diagnostics-directory.outputs.name }}/darwin-kernel.stderr.txt
+          retention-days: 3
+          include-hidden-files: false
+          if-no-files-found: error
+          overwrite: false
+      - name: Remove owned failure diagnostics directory
+        id: diagnostics-cleanup
+        if: ${{ always() && inputs.enable-failure-diagnostics && steps.diagnostics-directory.outcome == 'success' && steps.diagnostics-directory.outputs.name != '' }}
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: /bin/rm -rf "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}"
 
   success:
     runs-on: ubuntu-latest
