@@ -88,6 +88,11 @@ on:
         required: false
         default: true
         type: boolean
+      single-build-job:
+        description: Limit the primary flake check to one concurrent Nix build job.
+        required: false
+        default: false
+        type: boolean
       enable-failure-diagnostics:
         description: |
           Retain same-job native diagnostics on flake or devShell failure for 3 days.
@@ -380,7 +385,7 @@ jobs:
       - name: nix flake check
         id: flake-check
         working-directory: ${{ inputs.directory }}
-        run: nix flake check --verbose
+        run: ${{ inputs.single-build-job && 'nix flake check --verbose --max-jobs 1' || 'nix flake check --verbose' }}
       - name: Validate devShells
         if: ${{ inputs.check-dev-shells }}
         id: devshells

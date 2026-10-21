@@ -47,6 +47,7 @@ jobs:
       # The composite is validated at runtime by the `setup-composite-smoke`
       # job + the structural assertions in tests/setup-action-structure/.
       - run: nix run nixpkgs#actionlint -- ./.github/workflows/workflow.yml ./.github/workflows/validate.yml
+      - run: nix build .#checks.x86_64-linux.single-build-job-contract --no-link -L
       - name: Run shell contract tests
         run: |
           set -euo pipefail
@@ -76,6 +77,16 @@ jobs:
       directory: ./tests/smoke
       # NOTE: This repo's own CI uses GitHub-hosted runners, not the org self-hosted defaults
       runner-map: '{"x86_64-linux": "ubuntu-latest", "aarch64-darwin": "macos-latest"}'
+
+  single-build-job-smoke:
+    uses: ./.github/workflows/workflow.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      directory: ./tests/smoke
+      runner-map: '{"x86_64-linux": "ubuntu-latest", "aarch64-darwin": "macos-latest"}'
+      single-build-job: true
 
   # Smoke test for the setup composite when consumed STANDALONE (not via
   # workflow.yml). Validates that bespoke per-repo workflows can `uses:`
@@ -886,6 +897,7 @@ jobs:
       fail-fast: false
       check-dev-shells: false
       enable-failure-diagnostics: true
+      single-build-job: true
 
   failure-diagnostics-default-flake:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run-failure-diagnostics }}
@@ -911,3 +923,4 @@ jobs:
       fail-fast: false
       check-dev-shells: true
       enable-failure-diagnostics: true
+      single-build-job: true
