@@ -47,7 +47,7 @@ jobs:
       # The composite is validated at runtime by the `setup-composite-smoke`
       # job + the structural assertions in tests/setup-action-structure/.
       - run: nix run nixpkgs#actionlint -- ./.github/workflows/workflow.yml ./.github/workflows/validate.yml
-      - run: nix build .#checks.x86_64-linux.single-build-job-contract --no-link -L
+      - run: nix build .#checks.x86_64-linux.single-build-job-contract .#checks.x86_64-linux.success-gate .#checks.x86_64-linux.success-gate-controls --no-link -L
       - name: Run shell contract tests
         run: |
           set -euo pipefail
