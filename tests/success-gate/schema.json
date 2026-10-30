@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["jobs"],
+  "properties": {
+    "jobs": {
+      "type": "object",
+      "required": ["inventory", "build", "success"],
+      "properties": {
+        "build": {
+          "type": "object",
+          "required": ["needs"],
+          "properties": {
+            "needs": { "const": "inventory" },
+            "continue-on-error": { "const": false }
+          }
+        },
+        "success": {
+          "type": "object",
+          "required": ["needs", "if", "steps"],
+          "properties": {
+            "needs": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "uniqueItems": true,
+              "items": { "enum": ["inventory", "build"] }
+            },
+            "if": { "const": "${{ always() }}" },
+            "continue-on-error": { "const": false },
+            "steps": {
+              "type": "array",
+              "contains": {
+                "type": "object",
+                "required": ["if", "run"],
+                "properties": {
+                  "if": {
+                    "const": "${{ needs.inventory.result != 'success' || needs.build.result != 'success' }}"
+                  },
+                  "run": {
+                    "type": "string",
+                    "pattern": "(^|\n)[ \t]*exit 1(\n|$)"
+                  },
+                  "continue-on-error": { "const": false }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

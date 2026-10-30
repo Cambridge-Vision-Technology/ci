@@ -49,6 +49,7 @@
               ./tests/failure-diagnostics/fixture/flake.lock
               ./tests/failure-diagnostics/dev-shell-fixture/flake.lock
               ./tests/failure-diagnostics/single-build-job.schema.json
+              ./tests/success-gate/schema.json
             ];
           };
           formatNixSource = lib.fileset.toSource {
@@ -96,6 +97,29 @@
               ./tests/failure-diagnostics/single-build-job.schema.json
             ];
           };
+          successGateSource = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              ./.github/workflows/workflow.yml
+              ./tests/success-gate/schema.json
+            ];
+          };
+          checkSuccessGate =
+            name: workflow:
+            pkgs.runCommand name { nativeBuildInputs = [ pkgs.check-jsonschema ]; } ''
+              exec check-jsonschema --schemafile ${successGateSource}/tests/success-gate/schema.json ${workflow} > "$out"
+            '';
+          workflowText = builtins.readFile ./.github/workflows/workflow.yml;
+          strictGate = "\${{ needs.inventory.result != 'success' || needs.build.result != 'success' }}";
+          missingInventory = pkgs.writeText "missing-inventory.yml" (
+            lib.replaceStrings [ "needs: [inventory, build]" ] [ "needs: build" ] workflowText
+          );
+          skippedBuildAccepted = pkgs.writeText "skipped-build-accepted.yml" (
+            lib.replaceStrings
+              [ strictGate ]
+              [ "\${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" ]
+              workflowText
+          );
         in
         {
           actionlint =
@@ -114,7 +138,7 @@
               }
               ''
                 set -euo pipefail
-                exec prettier --check ${formatSelectedSource}/.github/workflows/workflow.yml ${formatSelectedSource}/.github/workflows/validate.yml ${formatSelectedSource}/tests/failure-diagnostics/fixture/flake.lock ${formatSelectedSource}/tests/failure-diagnostics/dev-shell-fixture/flake.lock ${formatSelectedSource}/tests/failure-diagnostics/single-build-job.schema.json > "$out"
+                exec prettier --check ${formatSelectedSource}/.github/workflows/workflow.yml ${formatSelectedSource}/.github/workflows/validate.yml ${formatSelectedSource}/tests/failure-diagnostics/fixture/flake.lock ${formatSelectedSource}/tests/failure-diagnostics/dev-shell-fixture/flake.lock ${formatSelectedSource}/tests/failure-diagnostics/single-build-job.schema.json ${formatSelectedSource}/tests/success-gate/schema.json > "$out"
               '';
           format-nix =
             pkgs.runCommand "format-nix"
@@ -180,6 +204,17 @@
                 set -euo pipefail
                 exec check-jsonschema --schemafile ${singleBuildJobContractSource}/tests/failure-diagnostics/single-build-job.schema.json ${singleBuildJobContractSource}/.github/workflows/workflow.yml ${singleBuildJobContractSource}/.github/workflows/validate.yml > "$out"
               '';
+          success-gate = checkSuccessGate "success-gate" "${successGateSource}/.github/workflows/workflow.yml";
+          success-gate-controls = pkgs.linkFarm "success-gate-controls" [
+            {
+              name = "missing-inventory";
+              path = pkgs.testers.testBuildFailure (checkSuccessGate "reject-missing-inventory" missingInventory);
+            }
+            {
+              name = "skipped-build";
+              path = pkgs.testers.testBuildFailure (checkSuccessGate "reject-skipped-build" skippedBuildAccepted);
+            }
+          ];
         }
       );
 
