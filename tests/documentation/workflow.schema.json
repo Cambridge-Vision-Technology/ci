@@ -83,6 +83,7 @@
             "if",
             "needs",
             "permissions",
+            "env",
             "concurrency",
             "environment",
             "steps"
@@ -97,6 +98,18 @@
                 "contents": "read",
                 "pages": "write",
                 "id-token": "write"
+              }
+            },
+            "env": {
+              "required": [
+                "GH_TOKEN",
+                "DOCS_SYSTEM",
+                "DOCS_PRODUCER_ARTIFACT_ID"
+              ],
+              "properties": {
+                "DOCS_PRODUCER_ARTIFACT_ID": {
+                  "const": "${{ needs.build.outputs.docs-artifact }}"
+                }
               }
             },
             "concurrency": {

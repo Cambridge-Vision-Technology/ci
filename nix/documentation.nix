@@ -64,6 +64,11 @@ let
           "refs"
           "now"
           "datetime"
+        ]
+        ++ pkgs.lib.optionals (builtins.elem "tools/CI/Docs/TransportFixture.purs" files) [
+          "refs"
+          "node-event-emitter"
+          "node-buffer"
         ];
     });
   compiler = compile inventory.docs platformFiles;
@@ -85,6 +90,16 @@ let
   ];
   fixtureCompiler = compile inventory.fixture fixtureFiles;
   fixture = fixtureCompiler.script { module = "CI.Docs.Fixture"; };
+  transportFixtureCompiler = compile inventory.transportFixture platformFiles;
+  transportFixture = transportFixtureCompiler.script { module = "CI.Docs.TransportFixture"; };
+  fakeCurl = pkgs.writeShellScriptBin "curl" ''
+    set -euo pipefail
+    exec ${transportFixture} curl "$@"
+  '';
+  fakeGh = pkgs.writeShellScriptBin "gh" ''
+    set -euo pipefail
+    exec ${transportFixture} gh "$@"
+  '';
   fixtureFor =
     mode:
     pkgs.writeShellScript "fixture-${mode}" ''
@@ -135,7 +150,13 @@ let
       ];
     }).script
       { module = "Build.CheckRunner"; };
-  lintSource = source (inventory.docs ++ inventory.fixture ++ inventory.tests ++ [ "whine.yaml" ]);
+  lintSource = source (
+    inventory.docs
+    ++ inventory.fixture
+    ++ inventory.tests
+    ++ inventory.transportFixture
+    ++ [ "whine.yaml" ]
+  );
   inventoryCheck =
     name: compilation: files: nativeFiles: entry:
     pkgs.runCommand "${name}-source-inventory" { } ''
@@ -178,6 +199,12 @@ let
     "evaluation"
   ];
   publicationCases = [
+    "transport"
+    "progress"
+    "retry-progress"
+    "progress-failure"
+    "unknown-status"
+    "retry-exhausted"
     "mechanism"
     "denial-protocol"
     "pr"
@@ -215,10 +242,15 @@ let
     mode:
     pkgs.runCommand "docs-publication-${mode}"
       {
-        nativeBuildInputs = [
-          pkgs.coreutils
-          fixtureSuccess
-        ];
+        nativeBuildInputs =
+          [
+            pkgs.coreutils
+            fixtureSuccess
+          ]
+          ++ pkgs.lib.optionals (mode == "transport") [
+            fakeCurl
+            fakeGh
+          ];
       }
       ''
         set -euo pipefail
@@ -264,7 +296,7 @@ in
       docs-format = pkgs.runCommand "docs-format" { } ''
         set -euo pipefail
         exec ${pkgs.nodePackages.purs-tidy}/bin/purs-tidy check ${
-          source (inventory.docs ++ inventory.fixture ++ inventory.tests)
+          source (inventory.docs ++ inventory.fixture ++ inventory.tests ++ inventory.transportFixture)
         }/tools > "$out"
       '';
       docs-workflow = workflowCheck "docs-workflow" "${workflowSource}/.github/workflows/workflow.yml";
@@ -280,6 +312,10 @@ in
       docs-fixture-source-inventory =
         inventoryCheck "ci-docs-fixture" fixtureCompiler inventory.fixture fixtureFiles
           "CI.Docs.Fixture";
+      docs-transport-fixture-source-inventory =
+        inventoryCheck "ci-docs-transport-fixture" transportFixtureCompiler inventory.transportFixture
+          platformFiles
+          "CI.Docs.TransportFixture";
       docs-generation = aggregate "docs-generation" generationChecks;
       docs-publication = aggregate "docs-publication" publicationChecks;
     }

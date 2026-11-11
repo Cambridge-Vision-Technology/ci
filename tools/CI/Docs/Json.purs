@@ -26,6 +26,10 @@ type DeploymentEvidence =
   , url :: String
   , status :: String
   , privateAccess :: String
+  , producerArtifact :: String
+  , pagesArtifact :: String
+  , bindingDigest :: String
+  , lastStatus :: String
   }
 
 newtype ArtifactJson = ArtifactJson Artifact

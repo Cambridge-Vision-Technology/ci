@@ -695,6 +695,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       DOCS_SYSTEM: ${{ needs.build.outputs.docs-system }}
+      DOCS_PRODUCER_ARTIFACT_ID: ${{ needs.build.outputs.docs-artifact }}
     steps:
       - uses: actions/checkout@v4
         with:

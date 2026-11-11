@@ -31,8 +31,11 @@ reject :: String -> Effect.Effect Unit -> Effect.Effect Unit
 reject message action = do
   result <- Effect.Exception.try action
   case result of
-    Data.Either.Right _ -> Effect.Exception.throw ("Expected rejection: " <> message)
-    Data.Either.Left error -> CI.Docs.Artifact.ensure (Data.String.contains (Data.String.Pattern message) (Effect.Exception.message error)) ("Wrong rejection: " <> Effect.Exception.message error)
+    Data.Either.Right _ ->
+      Effect.Exception.throw ("Expected rejection: " <> message)
+    Data.Either.Left error -> do
+      CI.Docs.Artifact.ensure (not (Data.String.contains (Data.String.Pattern "CREDENTIAL") (Effect.Exception.message error))) "Credential leaked through an error"
+      CI.Docs.Artifact.ensure (Data.String.contains (Data.String.Pattern message) (Effect.Exception.message error)) ("Wrong rejection: " <> Effect.Exception.message error)
 
 generation :: String -> String -> String -> String -> Effect.Effect Unit
 generation root tool fixture mode = do
@@ -126,13 +129,32 @@ publication root mode = do
   calls <- Effect.Ref.new 0
   recorded <- Effect.Ref.new 0
   successful <- Effect.Ref.new 0
+  waits <- Effect.Ref.new 0
+  observations <- Effect.Ref.new []
+  states <- Effect.Ref.new
+    ( case mode of
+        "progress" -> [ "deployment_in_progress", "syncing_files", "finished_file_sync", "updating_pages", "purging_cdn", "succeed" ]
+        "retry-progress" -> [ "deployment_attempt_error", "syncing_files", "succeed" ]
+        "progress-failure" -> [ "syncing_files", "deployment_content_failed" ]
+        "unknown-status" -> [ "unknown-provider-state" ]
+        "retry-exhausted" -> [ "deployment_attempt_error" ]
+        "deployment-failure" -> [ "deployment_failed" ]
+        _ -> [ "succeed" ]
+    )
   let
     get path
       | path == "repos/TEST/docs" = pure "{\"default_branch\":\"main\"}"
       | path == "repos/TEST/docs/pages" =
           if mode == "missing-site" then Effect.Exception.throw "Injected HTTP 404 from Pages"
           else pure ("{\"public\":" <> (if mode == "public-site" then "true" else "false") <> ",\"build_type\":\"workflow\",\"html_url\":\"https://test.example/\"}")
-      | path == "repos/TEST/docs/pages/deployments/returned-id" = pure ("{\"status\":\"" <> (if mode == "deployment-failure" then "deployment_failed" else "succeed") <> "\"}")
+      | path == "repos/TEST/docs/pages/deployments/returned-id" = do
+          remaining <- Effect.Ref.read states
+          case Data.Array.uncons remaining of
+            Data.Maybe.Just { head, tail } -> do
+              Effect.Ref.write (if Data.Array.null tail then [ head ] else tail) states
+              pure ("{\"status\":\"" <> head <> "\"}")
+            Data.Maybe.Nothing ->
+              Effect.Exception.throw "Unexpected status read"
       | otherwise = Effect.Exception.throw ("Unexpected TEST request: " <> path)
     probe url = do
       CI.Docs.Artifact.ensure (url == "https://test.example/") "Wrong TEST access probe target"
@@ -149,13 +171,24 @@ publication root mode = do
       , record: \deployment _ -> do
           CI.Docs.Artifact.ensure (deployment == "returned-id") "Assumed deployment identity rather than returned identity"
           Effect.Ref.modify_ (_ + 1) recorded
-      , wait: Effect.Exception.throw "Unexpected TEST polling delay"
+      , wait: Effect.Ref.modify_ (_ + 1) waits
+      , observed: \status -> Effect.Ref.modify_ (_ <> [ status ]) observations
       , verified: Effect.Ref.modify_ (_ + 1) successful
       }
     accepted = CI.Docs.Publication.publishWith client "push" "refs/heads/main" root "9876543210" identity
   case mode of
     "mechanism" ->
       accepted
+    "progress" ->
+      accepted
+    "retry-progress" ->
+      accepted
+    "progress-failure" ->
+      reject "deployment failed or unknown" accepted
+    "unknown-status" ->
+      reject "deployment failed or unknown" accepted
+    "retry-exhausted" ->
+      reject "verification deadline reached" accepted
     "denial-protocol" -> do
       CI.Docs.Artifact.ensure (CI.Docs.Publication.accessDenied "HTTP/2 302\r\nlocation: https://github.com/login?return_to=TEST\r\n\r\n") "CRLF authentication redirect was not recognized"
       CI.Docs.Artifact.ensure (CI.Docs.Publication.accessDenied "HTTP/1.1 200 Connection established\r\n\r\nHTTP/2 302\r\nlocation: https://github.com/login?return_to=TEST\r\n\r\n") "Proxy prelude hid the final authentication redirect"
@@ -195,11 +228,72 @@ publication root mode = do
   requests <- Effect.Ref.read calls
   records <- Effect.Ref.read recorded
   successes <- Effect.Ref.read successful
+  pauses <- Effect.Ref.read waits
+  seen <- Effect.Ref.read observations
   let
-    creationExpected = Data.Array.elem mode [ "mechanism", "creation-failure", "unavailable", "public-access", "spoof-access", "deployment-failure", "verification-failure" ]
+    creationExpected = Data.Array.elem mode [ "mechanism", "progress", "retry-progress", "progress-failure", "unknown-status", "retry-exhausted", "creation-failure", "unavailable", "public-access", "spoof-access", "deployment-failure", "verification-failure" ]
+    expectedWaits = case mode of
+      "progress" -> 5
+      "retry-progress" -> 2
+      "progress-failure" -> 1
+      "retry-exhausted" -> 100
+      _ -> 0
   CI.Docs.Artifact.ensure (requests == (if creationExpected then 1 else 0)) "Rejected publication unexpectedly created a deployment or skipped its expected creation"
   CI.Docs.Artifact.ensure (records == (if creationExpected && mode /= "creation-failure" then 1 else 0)) "Wrong deployment evidence multiplicity"
-  CI.Docs.Artifact.ensure (successes == (if mode == "mechanism" then 1 else 0)) "Wrong verified-deployment claim for the modeled state"
+  CI.Docs.Artifact.ensure (successes == (if Data.Array.elem mode [ "mechanism", "progress", "retry-progress" ] then 1 else 0)) "Wrong verified-deployment claim for the modeled state"
+  CI.Docs.Artifact.ensure (pauses == expectedWaits) "Wrong polling multiplicity"
+  when (mode == "progress") (CI.Docs.Artifact.ensure (seen == [ "deployment_in_progress", "syncing_files", "finished_file_sync", "updating_pages", "purging_cdn", "succeed", "succeed" ]) "Incomplete documented progress lifecycle")
+  when (mode == "retry-progress") (CI.Docs.Artifact.ensure (seen == [ "deployment_attempt_error", "syncing_files", "succeed", "succeed" ]) "Retryable status did not recover without recreating")
+  when (mode == "progress-failure") (CI.Docs.Artifact.ensure (seen == [ "syncing_files", "deployment_content_failed" ]) "Terminal failure after progress was not observed")
+  when (mode == "unknown-status") (CI.Docs.Artifact.ensure (seen == [ "unknown-provider-state" ]) "Unknown status was retried or lost")
+  when (mode == "retry-exhausted") (CI.Docs.Artifact.ensure (Data.Array.length seen == 100 && Data.Array.last seen == Data.Maybe.Just "deployment_attempt_error") "Bounded retry did not retain its last observed state")
+
+transport :: String -> Effect.Effect Unit
+transport root = do
+  Node.Process.setEnv "DOCS_TRANSPORT_TEST_ROOT" root
+  Node.Process.setEnv "DOCS_TRANSPORT_FAILURE" ""
+  Node.Process.setEnv "ACTIONS_ID_TOKEN_REQUEST_URL" "https://token.TEST.invalid/oidc"
+  Node.Process.setEnv "ACTIONS_ID_TOKEN_REQUEST_TOKEN" "TEST-REQUEST-CREDENTIAL"
+  Node.Process.setEnv "RUNNER_TEMP" root
+  Node.Process.setEnv "GITHUB_OUTPUT" (root <> "/output")
+  Node.Process.setEnv "GITHUB_REPOSITORY" "TEST/docs"
+  Node.Process.setEnv "GITHUB_SHA" "test-revision"
+  Node.Process.setEnv "GITHUB_RUN_ID" "1"
+  Node.Process.setEnv "GITHUB_RUN_ATTEMPT" "1"
+  Node.Process.setEnv "DOCS_PRODUCER_ARTIFACT_ID" "12345"
+  Platform.Node.Build.writeImpl (root <> "/binding.json") ""
+  Platform.Node.Build.writeImpl (root <> "/output") ""
+  creation <- Effect.Exception.try (CI.Docs.Publication.create (identityFor "synthetic-system") 9876543210.0)
+  created <- case creation of
+    Data.Either.Left error -> do
+      diagnostic <- Platform.Node.Build.existsImpl (root <> "/transport.error")
+      if diagnostic then Platform.Node.Build.readImpl (root <> "/transport.error") >>= Effect.Exception.throw
+      else Effect.Exception.throwException error
+    Data.Either.Right value ->
+      pure value
+  CI.Docs.Artifact.ensure (created.status_url == "https://api.github.com/repos/TEST/docs/pages/deployments/returned-id" && created.page_url == "https://test.example/") "Production adapter did not decode the returned deployment identity"
+  CI.Docs.Publication.record root "9876543210" "returned-id" created.page_url
+  initial <- Platform.Node.Build.readImpl (root <> "/private-pages-deployment.json") >>= CI.Docs.Artifact.parse :: Effect.Effect CI.Docs.Json.DeploymentEvidence
+  CI.Docs.Artifact.ensure (initial.deployment == "returned-id" && initial.producerArtifact == "12345" && initial.pagesArtifact == "9876543210" && initial.bindingDigest == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" && initial.lastStatus == "created") "Incomplete retained deployment provenance"
+  CI.Docs.Publication.observed "deployment_content_failed"
+  failed <- Platform.Node.Build.readImpl (root <> "/private-pages-deployment.json") >>= CI.Docs.Artifact.parse :: Effect.Effect CI.Docs.Json.DeploymentEvidence
+  CI.Docs.Artifact.ensure (failed.lastStatus == "deployment_content_failed" && failed.status == "created-not-yet-verified") "Failed status was not retained without a success claim"
+  CI.Docs.Publication.observed "succeed"
+  CI.Docs.Publication.verified
+  finalText <- Platform.Node.Build.readImpl (root <> "/private-pages-deployment.json")
+  final <- CI.Docs.Artifact.parse finalText :: Effect.Effect CI.Docs.Json.DeploymentEvidence
+  CI.Docs.Artifact.ensure (final.status == "succeed" && final.lastStatus == "succeed" && final.privateAccess == "denied") "Verified adapter did not update retained evidence"
+  output <- Platform.Node.Build.readImpl (root <> "/output")
+  CI.Docs.Artifact.ensure (output == "deployment_id=returned-id\npage_url=https://test.example/\n" && not (Data.String.contains (Data.String.Pattern "CREDENTIAL") (output <> finalText))) "Unsafe or incorrect production evidence/output adapter"
+  Node.Process.setEnv "DOCS_TRANSPORT_FAILURE" "oidc"
+  reject "Pages OIDC response invalid" (void (CI.Docs.Publication.create (identityFor "synthetic-system") 9876543210.0))
+  postsBeforeFailure <- Platform.Node.Build.readImpl (root <> "/post.calls")
+  CI.Docs.Artifact.ensure (postsBeforeFailure == "call\n") "Invalid OIDC response reached creation"
+  Node.Process.setEnv "DOCS_TRANSPORT_FAILURE" "post"
+  reject "creation failed or uncertain" (void (CI.Docs.Publication.create (identityFor "synthetic-system") 9876543210.0))
+  posts <- Platform.Node.Build.readImpl (root <> "/post.calls")
+  requests <- Platform.Node.Build.readImpl (root <> "/curl.calls")
+  CI.Docs.Artifact.ensure (posts == "call\ncall\n" && requests == "call\ncall\ncall\n") "Production transport repeated or omitted a request"
 
 main :: Effect.Effect Unit
 main = do
@@ -208,6 +302,7 @@ main = do
   root <- Platform.Node.Documents.temporaryRootImpl >>= \temp -> Platform.Node.Documents.temporaryDirectoryImpl (temp <> "/ci-docs-TEST-")
   result <- Effect.Exception.try case args of
     [ "generation", tool, fixture, mode, output ] -> generation (root <> "/consumer") tool fixture mode *> pure { output, label: mode <> " generation passed" }
+    [ "publication", "transport", output ] -> transport root *> pure { output, label: "Synthetic local production transport/evidence adapter check passed; no provider-origin or hosted evidence" }
     [ "publication", mode, output ] -> publication root mode *> pure { output, label: mode <> " synthetic component check passed; no provider-origin or hosted deployment evidence" }
     _ -> Effect.Exception.throw "Expected test case"
   Platform.Node.Build.executeImpl "chmod" [ "-R", "u+w", root ] "."
