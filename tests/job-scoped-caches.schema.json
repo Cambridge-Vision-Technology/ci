@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["on", "jobs"],
+  "properties": {
+    "on": {
+      "type": "object",
+      "required": ["workflow_call"],
+      "properties": {
+        "workflow_call": {
+          "type": "object",
+          "required": ["inputs"],
+          "properties": {
+            "inputs": {
+              "type": "object",
+              "required": ["nix-substituters"],
+              "properties": {
+                "nix-substituters": {
+                  "type": "object",
+                  "required": ["type", "required", "default"],
+                  "properties": {
+                    "type": { "const": "string" },
+                    "required": { "const": false },
+                    "default": { "const": "" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "jobs": {
+      "type": "object",
+      "required": ["build"],
+      "properties": {
+        "build": {
+          "type": "object",
+          "required": ["timeout-minutes", "steps"],
+          "properties": {
+            "timeout-minutes": { "const": 60 },
+            "steps": {
+              "type": "array",
+              "contains": {
+                "type": "object",
+                "required": ["name", "if", "env", "run"],
+                "properties": {
+                  "name": { "const": "Select job-scoped Nix binary caches" },
+                  "if": { "const": "${{ inputs.nix-substituters != '' }}" },
+                  "env": {
+                    "type": "object",
+                    "required": ["CI_NIX_SUBSTITUTERS"],
+                    "properties": {
+                      "CI_NIX_SUBSTITUTERS": {
+                        "const": "${{ inputs.nix-substituters }}"
+                      }
+                    }
+                  },
+                  "run": {
+                    "const": "exec printf '\\nsubstituters = %s\\n' \"$CI_NIX_SUBSTITUTERS\" >> \"${NIX_USER_CONF_FILES%%:*}\""
+                  }
+                }
+              },
+              "minContains": 1,
+              "maxContains": 1
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -45,6 +45,7 @@
               ./tests/failure-diagnostics/dev-shell-fixture/flake.lock
               ./tests/failure-diagnostics/single-build-job.schema.json
               ./tests/success-gate/schema.json
+              ./tests/job-scoped-caches.schema.json
             ];
           };
           formatNixSource = lib.fileset.toSource {
@@ -99,6 +100,13 @@
               ./tests/success-gate/schema.json
             ];
           };
+          jobScopedCachesSource = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              ./.github/workflows/workflow.yml
+              ./tests/job-scoped-caches.schema.json
+            ];
+          };
           checkSuccessGate =
             name: workflow:
             pkgs.runCommand name { nativeBuildInputs = [ pkgs.check-jsonschema ]; } ''
@@ -133,7 +141,7 @@
               }
               ''
                 set -euo pipefail
-                exec prettier --check ${formatSelectedSource}/.github/workflows/workflow.yml ${formatSelectedSource}/.github/workflows/validate.yml ${formatSelectedSource}/tests/failure-diagnostics/fixture/flake.lock ${formatSelectedSource}/tests/failure-diagnostics/dev-shell-fixture/flake.lock ${formatSelectedSource}/tests/failure-diagnostics/single-build-job.schema.json ${formatSelectedSource}/tests/success-gate/schema.json > "$out"
+                exec prettier --check ${formatSelectedSource}/.github/workflows/workflow.yml ${formatSelectedSource}/.github/workflows/validate.yml ${formatSelectedSource}/tests/failure-diagnostics/fixture/flake.lock ${formatSelectedSource}/tests/failure-diagnostics/dev-shell-fixture/flake.lock ${formatSelectedSource}/tests/failure-diagnostics/single-build-job.schema.json ${formatSelectedSource}/tests/success-gate/schema.json ${formatSelectedSource}/tests/job-scoped-caches.schema.json > "$out"
               '';
           format-nix =
             pkgs.runCommand "format-nix"
@@ -198,6 +206,12 @@
               ''
                 set -euo pipefail
                 exec check-jsonschema --schemafile ${singleBuildJobContractSource}/tests/failure-diagnostics/single-build-job.schema.json ${singleBuildJobContractSource}/.github/workflows/workflow.yml ${singleBuildJobContractSource}/.github/workflows/validate.yml > "$out"
+              '';
+          job-scoped-caches-contract =
+            pkgs.runCommand "job-scoped-caches-contract" { nativeBuildInputs = [ pkgs.check-jsonschema ]; }
+              ''
+                set -euo pipefail
+                exec ${pkgs.coreutils}/bin/timeout 60s check-jsonschema --schemafile ${jobScopedCachesSource}/tests/job-scoped-caches.schema.json ${jobScopedCachesSource}/.github/workflows/workflow.yml > "$out"
               '';
           success-gate = checkSuccessGate "success-gate" "${successGateSource}/.github/workflows/workflow.yml";
           success-gate-controls = pkgs.linkFarm "success-gate-controls" [

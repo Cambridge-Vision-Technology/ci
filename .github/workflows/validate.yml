@@ -47,7 +47,7 @@ jobs:
       # The composite is validated at runtime by the `setup-composite-smoke`
       # job + the structural assertions in tests/setup-action-structure/.
       - run: nix run nixpkgs#actionlint -- ./.github/workflows/workflow.yml ./.github/workflows/validate.yml
-      - run: nix build .#checks.x86_64-linux.single-build-job-contract .#checks.x86_64-linux.success-gate .#checks.x86_64-linux.success-gate-controls --no-link -L
+      - run: nix build .#checks.x86_64-linux.single-build-job-contract .#checks.x86_64-linux.job-scoped-caches-contract .#checks.x86_64-linux.success-gate .#checks.x86_64-linux.success-gate-controls --no-link -L
       - name: Run shell contract tests
         run: |
           set -euo pipefail
@@ -87,6 +87,9 @@ jobs:
       directory: ./tests/smoke
       runner-map: '{"x86_64-linux": "ubuntu-latest", "aarch64-darwin": "macos-latest"}'
       single-build-job: true
+      # Reuse this journey to exercise the opt-in; the ci job above keeps the
+      # unchanged default cache path. No extra smoke execution is introduced.
+      nix-substituters: https://cache.nixos.org/
 
   # Smoke test for the setup composite when consumed STANDALONE (not via
   # workflow.yml). Validates that bespoke per-repo workflows can `uses:`
