@@ -93,6 +93,15 @@ on:
         required: false
         default: false
         type: boolean
+      nix-substituters:
+        description: |
+          Optional space-separated binary cache URLs for this job's Nix commands.
+          Empty preserves the runner's configured caches. Nonempty replaces only
+          substituters in the private job configuration created by authentication;
+          it does not change runner files, trusted keys, or trusted-substituters.
+        required: false
+        default: ""
+        type: string
       enable-failure-diagnostics:
         description: |
           Retain same-job native diagnostics on flake or devShell failure for 3 days.
@@ -323,6 +332,13 @@ jobs:
         run: |
           set -euo pipefail
           "$GITHUB_WORKSPACE/.cvt-ci-auth/auth/authenticate.sh"
+      # Authentication always prepends its mode-600 job-owned Nix configuration.
+      # Change that file only; inherited user/system configuration stays intact.
+      - name: Select job-scoped Nix binary caches
+        if: ${{ inputs.nix-substituters != '' }}
+        env:
+          CI_NIX_SUBSTITUTERS: ${{ inputs.nix-substituters }}
+        run: exec printf '\nsubstituters = %s\n' "$CI_NIX_SUBSTITUTERS" >> "${NIX_USER_CONF_FILES%%:*}"
       - name: Remove shared authentication checkout
         run: |
           set -euo pipefail

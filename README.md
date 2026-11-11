@@ -201,6 +201,22 @@ An input marked `?lfs=1` therefore needs no SSH key — only `enable-org-read-ac
 
 ## Example configurations
 
+### Job-scoped binary caches
+
+The optional `nix-substituters` string replaces the space-separated binary cache
+URLs for this job's Nix commands. Empty (the default) leaves the runner's caches
+unchanged. For example, `nix-substituters: https://cache.nixos.org/` avoids an
+unavailable private cache without changing the runner's persistent configuration.
+
+The workflow appends this setting only to the mode-600 job-private Nix file
+created by authentication, before the flake check and devShell validation. It
+preserves the authentication settings and inherited user/system files. It does
+not add trusted keys or trusted-substituters; selected caches must already be
+permitted by the runner's existing trust policy. Supply cache URLs as trusted
+workflow configuration, never credentials or untrusted event text. This does not
+raise the job deadline or change failure gating. Removing the input restores
+normal cache selection on the next job.
+
 The sections below show configurations for some common use cases.
 
 ### Advanced usage
