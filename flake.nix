@@ -1,10 +1,29 @@
 {
   inputs = {
     nixpkgs.url = "https://flakehub.com/f/DeterminateSystems/nixpkgs-weekly/*";
+    purs-nix = {
+      url = "git+ssh://git@github.com/Cambridge-Vision-Technology/purs-nix?ref=main&lfs=1";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    platform = {
+      url = "git+ssh://git@github.com/Cambridge-Vision-Technology/purescript-platform.git?ref=main&lfs=1";
+      flake = false;
+    };
+    purescript-whine = {
+      url = "git+ssh://git@github.com/Cambridge-Vision-Technology/purescript-whine?ref=main&lfs=1";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.purs-nix.follows = "purs-nix";
+    };
   };
 
   outputs =
-    { nixpkgs, ... }:
+    {
+      nixpkgs,
+      purs-nix,
+      platform,
+      purescript-whine,
+      ...
+    }:
     let
       inherit (nixpkgs) lib;
 
@@ -23,8 +42,20 @@
           in
           f { inherit pkgs; }
         );
+      documentation =
+        pkgs:
+        import ./nix/documentation.nix {
+          inherit
+            pkgs
+            purs-nix
+            platform
+            purescript-whine
+            ;
+        };
     in
     {
+      packages = forEachSystem ({ pkgs }: (documentation pkgs).packages);
+      apps = forEachSystem ({ pkgs }: (documentation pkgs).apps);
       checks = forEachSystem (
         { pkgs }:
         let
@@ -46,12 +77,19 @@
               ./tests/failure-diagnostics/single-build-job.schema.json
               ./tests/success-gate/schema.json
               ./tests/job-scoped-caches.schema.json
+              ./tests/documentation/workflow.schema.json
+              ./tools/inputs.json
+              ./whine.yaml
+              ./tests/docs-smoke/flake.lock
             ];
           };
           formatNixSource = lib.fileset.toSource {
             root = ./.;
             fileset = lib.fileset.unions [
               ./flake.nix
+              ./nix/documentation.nix
+              ./nix/docs-app-present.nix
+              ./tests/docs-smoke/flake.nix
               ./tests/failure-diagnostics/fixture/flake.nix
               ./tests/failure-diagnostics/dev-shell-fixture/flake.nix
             ];
@@ -113,9 +151,9 @@
               exec check-jsonschema --schemafile ${successGateSource}/tests/success-gate/schema.json ${workflow} > "$out"
             '';
           workflowText = builtins.readFile ./.github/workflows/workflow.yml;
-          strictGate = "\${{ needs.inventory.result != 'success' || needs.build.result != 'success' }}";
+          strictGate = "\${{ needs.inventory.result != 'success' || needs.build.result != 'success' || (needs.publish-docs.result != 'success' && needs.publish-docs.result != 'skipped') }}";
           missingInventory = pkgs.writeText "missing-inventory.yml" (
-            lib.replaceStrings [ "needs: [inventory, build]" ] [ "needs: build" ] workflowText
+            lib.replaceStrings [ "needs: [inventory, build, publish-docs]" ] [ "needs: build" ] workflowText
           );
           skippedBuildAccepted = pkgs.writeText "skipped-build-accepted.yml" (
             lib.replaceStrings
@@ -124,7 +162,8 @@
               workflowText
           );
         in
-        {
+        (documentation pkgs).checks
+        // {
           actionlint =
             pkgs.runCommand "actionlint"
               {
@@ -141,7 +180,7 @@
               }
               ''
                 set -euo pipefail
-                exec prettier --check ${formatSelectedSource}/.github/workflows/workflow.yml ${formatSelectedSource}/.github/workflows/validate.yml ${formatSelectedSource}/tests/failure-diagnostics/fixture/flake.lock ${formatSelectedSource}/tests/failure-diagnostics/dev-shell-fixture/flake.lock ${formatSelectedSource}/tests/failure-diagnostics/single-build-job.schema.json ${formatSelectedSource}/tests/success-gate/schema.json ${formatSelectedSource}/tests/job-scoped-caches.schema.json > "$out"
+                exec prettier --check ${formatSelectedSource}/.github/workflows/workflow.yml ${formatSelectedSource}/.github/workflows/validate.yml ${formatSelectedSource}/tests/failure-diagnostics/fixture/flake.lock ${formatSelectedSource}/tests/failure-diagnostics/dev-shell-fixture/flake.lock ${formatSelectedSource}/tests/failure-diagnostics/single-build-job.schema.json ${formatSelectedSource}/tests/success-gate/schema.json ${formatSelectedSource}/tests/job-scoped-caches.schema.json ${formatSelectedSource}/tests/documentation/workflow.schema.json ${formatSelectedSource}/tools/inputs.json ${formatSelectedSource}/whine.yaml ${formatSelectedSource}/tests/docs-smoke/flake.lock > "$out"
               '';
           format-nix =
             pkgs.runCommand "format-nix"
@@ -150,7 +189,7 @@
               }
               ''
                 set -euo pipefail
-                exec nixfmt --check ${formatNixSource}/flake.nix ${formatNixSource}/tests/failure-diagnostics/fixture/flake.nix ${formatNixSource}/tests/failure-diagnostics/dev-shell-fixture/flake.nix > "$out"
+                exec nixfmt --check ${formatNixSource}/flake.nix ${formatNixSource}/nix/documentation.nix ${formatNixSource}/nix/docs-app-present.nix ${formatNixSource}/tests/docs-smoke/flake.nix ${formatNixSource}/tests/failure-diagnostics/fixture/flake.nix ${formatNixSource}/tests/failure-diagnostics/dev-shell-fixture/flake.nix > "$out"
               '';
           runner-map-transform =
             pkgs.runCommand "runner-map-transform"

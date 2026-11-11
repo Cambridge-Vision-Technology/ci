@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["jobs"],
+  "properties": {
+    "jobs": {
+      "type": "object",
+      "required": ["build", "publish-docs", "success"],
+      "properties": {
+        "build": {
+          "required": ["outputs", "steps"],
+          "properties": {
+            "outputs": {
+              "properties": {
+                "docs-present": {
+                  "const": "${{ steps.docs.outputs.present }}"
+                },
+                "docs-artifact": {
+                  "const": "${{ steps.docs-upload.outputs.artifact-id }}"
+                }
+              },
+              "required": ["docs-present", "docs-artifact", "docs-system"]
+            },
+            "steps": {
+              "allOf": [
+                {
+                  "contains": {
+                    "required": ["id", "if", "run"],
+                    "properties": {
+                      "id": { "const": "docs-detection" },
+                      "if": {
+                        "const": "${{ matrix.systems.nix-system == fromJSON(needs.inventory.outputs.systems)[0].nix-system }}"
+                      },
+                      "run": { "pattern": "nix/docs-app-present\\.nix" }
+                    }
+                  },
+                  "minContains": 1,
+                  "maxContains": 1
+                },
+                {
+                  "contains": {
+                    "required": ["id", "if", "run"],
+                    "properties": {
+                      "id": { "const": "docs" },
+                      "if": {
+                        "const": "${{ steps.docs-detection.outputs.present == 'true' }}"
+                      },
+                      "run": {
+                        "const": "exec \"$RUNNER_TEMP/cvt-docs-tool/bin/ci-docs\" generate \"$DOCS_DIRECTORY\""
+                      }
+                    }
+                  },
+                  "minContains": 1,
+                  "maxContains": 1
+                },
+                {
+                  "contains": {
+                    "required": ["id", "if", "with"],
+                    "properties": {
+                      "id": { "const": "docs-upload" },
+                      "if": {
+                        "const": "${{ steps.docs.outputs.present == 'true' }}"
+                      },
+                      "with": {
+                        "required": ["path"],
+                        "properties": {
+                          "path": {
+                            "const": "${{ steps.docs.outputs.bundle }}"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "minContains": 1,
+                  "maxContains": 1
+                }
+              ]
+            }
+          }
+        },
+        "publish-docs": {
+          "required": [
+            "if",
+            "needs",
+            "permissions",
+            "concurrency",
+            "environment",
+            "steps"
+          ],
+          "properties": {
+            "if": {
+              "const": "${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.build.result == 'success' && needs.build.outputs.docs-present == 'true' }}"
+            },
+            "needs": { "const": ["inventory", "build"] },
+            "permissions": {
+              "const": {
+                "contents": "read",
+                "pages": "write",
+                "id-token": "write"
+              }
+            },
+            "concurrency": {
+              "const": {
+                "group": "private-pages-${{ github.repository }}",
+                "cancel-in-progress": false
+              }
+            },
+            "environment": {
+              "required": ["name"],
+              "properties": { "name": { "const": "github-pages" } }
+            },
+            "steps": {
+              "minItems": 7,
+              "maxItems": 7,
+              "prefixItems": [
+                {
+                  "required": ["uses", "with"],
+                  "properties": {
+                    "with": {
+                      "required": ["repository", "ref", "persist-credentials"],
+                      "properties": {
+                        "repository": {
+                          "const": "${{ job.workflow_repository }}"
+                        },
+                        "ref": { "const": "${{ job.workflow_sha }}" },
+                        "persist-credentials": { "const": false }
+                      }
+                    }
+                  }
+                },
+                {
+                  "required": ["uses"],
+                  "properties": { "uses": { "const": "./setup" } }
+                },
+                {
+                  "required": ["uses", "with"],
+                  "properties": {
+                    "with": {
+                      "required": ["artifact-ids"],
+                      "properties": {
+                        "artifact-ids": {
+                          "const": "${{ needs.build.outputs.docs-artifact }}"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "required": ["run"],
+                  "properties": {
+                    "run": {
+                      "const": "nix run .#docs-tool -- preflight \"$RUNNER_TEMP/documentation\""
+                    }
+                  }
+                },
+                {
+                  "required": ["id", "uses", "with"],
+                  "properties": {
+                    "id": { "const": "pages-artifact" },
+                    "with": {
+                      "required": ["path"],
+                      "properties": {
+                        "path": {
+                          "const": "${{ runner.temp }}/documentation/site"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "required": ["id", "run", "env"],
+                  "properties": {
+                    "id": { "const": "deployment" },
+                    "run": {
+                      "const": "nix run .#docs-tool -- publish \"$RUNNER_TEMP/documentation\" \"$PAGES_ARTIFACT\""
+                    },
+                    "env": {
+                      "required": ["PAGES_ARTIFACT"],
+                      "properties": {
+                        "PAGES_ARTIFACT": {
+                          "const": "${{ steps.pages-artifact.outputs.artifact_id }}"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "required": ["if", "uses", "with"],
+                  "properties": {
+                    "if": {
+                      "const": "${{ always() && steps.deployment.outputs.deployment_id != '' }}"
+                    },
+                    "with": {
+                      "required": ["path"],
+                      "properties": {
+                        "path": {
+                          "const": "${{ runner.temp }}/private-pages-deployment.json"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

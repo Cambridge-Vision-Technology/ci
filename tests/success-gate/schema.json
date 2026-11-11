@@ -21,10 +21,10 @@
           "properties": {
             "needs": {
               "type": "array",
-              "minItems": 2,
-              "maxItems": 2,
+              "minItems": 3,
+              "maxItems": 3,
               "uniqueItems": true,
-              "items": { "enum": ["inventory", "build"] }
+              "items": { "enum": ["inventory", "build", "publish-docs"] }
             },
             "if": { "const": "${{ always() }}" },
             "continue-on-error": { "const": false },
@@ -35,7 +35,7 @@
                 "required": ["if", "run"],
                 "properties": {
                   "if": {
-                    "const": "${{ needs.inventory.result != 'success' || needs.build.result != 'success' }}"
+                    "const": "${{ needs.inventory.result != 'success' || needs.build.result != 'success' || (needs.publish-docs.result != 'success' && needs.publish-docs.result != 'skipped') }}"
                   },
                   "run": {
                     "type": "string",

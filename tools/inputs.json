@@ -1,0 +1,10 @@
+{
+  "docs": [
+    "tools/CI/Docs/Main.purs",
+    "tools/CI/Docs/Artifact.purs",
+    "tools/CI/Docs/Json.purs",
+    "tools/CI/Docs/Publication.purs"
+  ],
+  "fixture": ["tools/CI/Docs/Fixture.purs"],
+  "tests": ["tools/CI/Docs/Test.purs"]
+}

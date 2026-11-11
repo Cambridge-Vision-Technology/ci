@@ -428,7 +428,7 @@ else
   fail "the workflow declares org-read-repositories but never wires it to create-github-app-token's repositories input"
 fi
 
-workflow_scope_wirings="$(count_occurrences 'repositories: ${{ inputs.org-read-repositories }}' "$WORKFLOW")"
+workflow_scope_wirings="$(count_occurrences '          repositories: ${{ inputs.org-read-repositories }}' "$WORKFLOW")"
 if [ "$workflow_scope_wirings" -eq 1 ]; then
   pass "org-read-repositories is wired exactly once in the workflow"
 else
@@ -534,7 +534,7 @@ fi
 # gets a 404 for every other repository; the shared script clears it. A checkout
 # running after that step would put it straight back.
 
-last_checkout_line="$(awk 'index($0, "uses: actions/checkout@") { line = NR } END { print line + 0 }' "$WORKFLOW")"
+last_checkout_line="$(awk '/^  publish-docs:/ { exit } index($0, "uses: actions/checkout@") { line = NR } END { print line + 0 }' "$WORKFLOW")"
 authenticate_step_line="$(line_of 'name: Authenticate git and Nix to github.com' "$WORKFLOW")"
 if [ "$last_checkout_line" -gt 0 ] &&
   [[ -n "$authenticate_step_line" && "$authenticate_step_line" -gt "$last_checkout_line" ]]; then

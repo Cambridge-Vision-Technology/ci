@@ -13,11 +13,14 @@ Shared reusable GitHub Actions workflow for Nix projects. Automatically builds o
 
 - `.github/workflows/workflow.yml` — the reusable workflow (called by consumer repos)
 - `.github/workflows/validate.yml` — self-validation CI for this repo
-- `tests/` — shell-based tests run via `nix flake check`
+- `tests/` — existing contract tests run through Nix checks
+- `tools/CI/Docs/` — PureScript documentation generation/publication and focused checks
 
 ## Testing
 
-Tests are pure shell scripts in `tests/*/test.sh`. They validate workflow YAML structure and jq transformations. Run all tests with `nix flake check`.
+Preserve the existing shell contracts. Write new logic and checks in PureScript.
+Run focused named checks during development. The final committed candidate must
+pass `nix flake check` before independent review and publication.
 
 # CI Repo Guidance
 
@@ -27,7 +30,12 @@ The reusable workflow accepts these inputs: `enable-ssh-agent`, `directory`, `fa
 
 ## Test Structure
 
-Each test directory under `tests/` contains a `test.sh` that is wired into `nix flake check` as a derivation. Tests use `yq` and `jq` to parse and validate the workflow YAML.
+Existing shell contracts under `tests/*/test.sh` remain executable references.
+Documentation CLI/mechanism checks live in `tools/CI/Docs/`, with narrow inputs
+declared in `tools/inputs.json`. `tests/documentation/` holds the workflow schema;
+`tests/docs-smoke/` is the real PR artifact fixture. Use the named
+`docs-generation`, `docs-publication`, `docs-workflow` and source/lint checks.
+Do not add test logic to shell scripts or weaken their retained assertions.
 
 ## Formatting
 
