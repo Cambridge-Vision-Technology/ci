@@ -18,24 +18,6 @@ fail() {
   failed=$((failed + 1))
 }
 
-# --- Helper: extract the build job block ---
-# Captures everything between "  build:" and the next top-level job key
-extract_build_block() {
-  local in_build=false
-  while IFS= read -r line; do
-    if [[ "$line" == "  build:" ]] || [[ "$line" == "  build: "* ]]; then
-      in_build=true
-      continue
-    fi
-    if $in_build; then
-      if [[ "$line" =~ ^[[:space:]]{2}[a-zA-Z_][a-zA-Z0-9_-]*: ]] && ! [[ "$line" =~ ^[[:space:]]{3,} ]]; then
-        break
-      fi
-      echo "$line"
-    fi
-  done < "$WORKFLOW"
-}
-
 # --- Helper: extract a named build step, including its name line ---
 extract_named_build_step() {
   local step_name="$1"
@@ -151,23 +133,9 @@ else
   fail "jobs missing timeout-minutes: ${jobs_without_timeout[*]}"
 fi
 
-# --- Build job contains nix flake check ---
-
-build_block="$(extract_build_block)"
-
-if echo "$build_block" | grep -q 'nix flake check'; then
-  pass "build job contains 'nix flake check'"
-else
-  fail "build job does not contain 'nix flake check'"
-fi
-
-# --- Build job contains devShell validation ---
-
-if echo "$build_block" | grep -q 'nix develop.*--command true'; then
-  pass "build job contains devShell validation step"
-else
-  fail "build job does not contain devShell validation step"
-fi
+# Build-command, permission and deprecated SSH-path assertions moved to
+# job-scoped-caches.schema.json. Parsing YAML avoids echo/grep -q SIGPIPE under
+# pipefail when the complete build block exceeds the pipe buffer.
 
 # --- check-dev-shells input is declared ---
 
@@ -223,14 +191,6 @@ if grep -qE '^\s*#\s*-\s+uses:' "$WORKFLOW"; then
   fail "workflow contains commented-out action references (e.g. '# - uses:')"
 else
   pass "no commented-out action references"
-fi
-
-# --- Build job has id-token: write ---
-
-if echo "$build_block" | grep -q 'id-token.*write'; then
-  pass "build job has id-token: write"
-else
-  fail "build job does not have id-token: write"
 fi
 
 # --- All deprecated no-op inputs are declared ---
@@ -301,26 +261,6 @@ for setup_surface in "$WORKFLOW" "$REPO_ROOT/setup/action.yml"; do
     fi
   done
 done
-
-# --- Deprecated ssh-agent path stays functional ---
-
-if echo "$build_block" | grep -qE 'webfactory/ssh-agent'; then
-  pass "build job still has webfactory/ssh-agent reference (inline)"
-else
-  fail "build job no longer has webfactory/ssh-agent reference"
-fi
-
-if echo "$build_block" | grep -qE 'name: Add GitHub SSH host keys'; then
-  pass "build job still has 'Add GitHub SSH host keys' step (inline)"
-else
-  fail "build job no longer has 'Add GitHub SSH host keys' step"
-fi
-
-if echo "$build_block" | grep -qF 'if: ${{ inputs.enable-ssh-agent }}'; then
-  pass "ssh-agent steps remain gated on inputs.enable-ssh-agent"
-else
-  fail "ssh-agent steps are not gated on inputs.enable-ssh-agent"
-fi
 
 # --- Stale credential cleanup stays inline and runs before checkout ---
 # Delegation cannot cover this: reaching the shared script requires a checkout

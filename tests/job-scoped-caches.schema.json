@@ -36,11 +36,54 @@
       "properties": {
         "build": {
           "type": "object",
-          "required": ["timeout-minutes", "steps"],
+          "required": ["timeout-minutes", "steps", "permissions"],
           "properties": {
             "timeout-minutes": { "const": 60 },
+            "permissions": {
+              "type": "object",
+              "required": ["id-token"],
+              "properties": { "id-token": { "const": "write" } }
+            },
             "steps": {
               "type": "array",
+              "allOf": [
+                {
+                  "contains": {
+                    "type": "object",
+                    "required": ["run"],
+                    "properties": { "run": { "pattern": "nix flake check" } }
+                  }
+                },
+                {
+                  "contains": {
+                    "type": "object",
+                    "required": ["run"],
+                    "properties": {
+                      "run": { "pattern": "nix develop.*--command true" }
+                    }
+                  }
+                },
+                {
+                  "contains": {
+                    "type": "object",
+                    "required": ["uses", "if"],
+                    "properties": {
+                      "uses": { "pattern": "^webfactory/ssh-agent@" },
+                      "if": { "const": "${{ inputs.enable-ssh-agent }}" }
+                    }
+                  }
+                },
+                {
+                  "contains": {
+                    "type": "object",
+                    "required": ["name", "if"],
+                    "properties": {
+                      "name": { "const": "Add GitHub SSH host keys" },
+                      "if": { "const": "${{ inputs.enable-ssh-agent }}" }
+                    }
+                  }
+                }
+              ],
               "contains": {
                 "type": "object",
                 "required": ["name", "if", "env", "run"],
