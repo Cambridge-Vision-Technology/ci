@@ -1319,13 +1319,13 @@ for self_hosted_auth_probe in "${self_hosted_auth_probes[@]}"; do
   self_hosted_auth_probe_block="$(extract_validate_job "$self_hosted_auth_probe_job")"
   # Read back the label the job actually declares, never the one expected, so
   # the coverage check below sees the workflow rather than this suite's list.
-  self_hosted_auth_probe_declared_label="$(printf '%s\n' "$self_hosted_auth_probe_block" | awk '
+  self_hosted_auth_probe_declared_label="$(awk '
     index($0, "runs-on:") {
       sub(/^[[:space:]]*runs-on:[[:space:]]*/, "")
       print
       exit
     }
-  ')"
+  ' <<< "$self_hosted_auth_probe_block")"
 
   if [ "$self_hosted_auth_probe_declared_label" = "$self_hosted_auth_probe_label" ]; then
     pass "$self_hosted_auth_probe_job runs on the self-hosted runner $self_hosted_auth_probe_label"
@@ -1335,13 +1335,13 @@ for self_hosted_auth_probe in "${self_hosted_auth_probes[@]}"; do
 
   # The DEV-757 build_workstation_index shape is the standalone action WITHOUT
   # the setup composite. A probe that reached for setup would not prove it.
-  if echo "$self_hosted_auth_probe_block" | grep -qF 'uses: ./auth'; then
+  if grep -qF 'uses: ./auth' <<< "$self_hosted_auth_probe_block"; then
     pass "$self_hosted_auth_probe_job exercises the standalone auth action"
   else
     fail "$self_hosted_auth_probe_job does not exercise the standalone auth action"
   fi
 
-  if echo "$self_hosted_auth_probe_block" | grep -qF 'uses: ./setup'; then
+  if grep -qF 'uses: ./setup' <<< "$self_hosted_auth_probe_block"; then
     fail "$self_hosted_auth_probe_job uses the setup composite, so it does not prove the standalone path"
   else
     pass "$self_hosted_auth_probe_job never uses the setup composite"
