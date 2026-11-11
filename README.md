@@ -22,28 +22,102 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   CI:
     uses: $YOURORG/ci/.github/workflows/workflow.yml@main
     permissions:
       contents: read
+      pages: write
       id-token: write
 ```
 
 <!-- prettier-ignore-start -->
 
 > [!IMPORTANT]
-> Both permissions are required.
+> All three permissions are required, including for callers without documentation.
 > `contents: read` lets the job check out your repository.
 > `id-token: write` is required **now**, even though the credential source today is a GitHub App secret rather than OIDC: only the *caller* can grant OIDC, and a reusable workflow can never hold more permission than the workflow that called it.
 > Granting it up front means the move to an STS (DEV-753) does not force a second organisation-wide sweep of every call site.
+> `pages: write` grants the separate private documentation publication job. GitHub validates reusable-workflow permissions before runtime app detection; a no-app skip cannot bypass this validation.
 
 <!-- prettier-ignore-end -->
 
 ...and you're done!
 Replace `$YOURORG` with your GitHub organisation or user.
+
+## Private documentation publication
+
+The standard reusable workflow owns documentation generation, artifact transfer
+and publication. The sole content opt-in is `apps.<system>.docs` on the first
+system in the runner map. The repository owns the generator and its content
+checks. `nix run .#docs` must generate a fresh static site at `.out/docs/`,
+relative to `directory`. It must not publish, provision hosting, change site
+visibility or start a preview server. Keep optional preview/PDF commands separate.
+CI is renderer-neutral; the canonical template uses Inkwell. Do not copy a
+publisher workflow, add a publisher manifest or pass output-directory settings.
+
+If the app is absent, CI explicitly skips generation/publication, even with an
+existing `.out/docs/`. Evaluation failures fail the build rather than masquerade
+as absence. A present app runs once, after successful local build gates on the
+selected system. Failed generation or missing/empty/unsafe output fails the
+gate. The artifact needs a usable `index.html` and ordinary files/directories,
+not links, devices, sockets or Git metadata. Publish only intended documentation,
+never fixtures, recordings, secrets or patient data.
+
+The selected job retains the pinned shared tooling source without Git metadata,
+removes its temporary checkout, and completes authentication/LFS/SSH setup before
+evaluating the consumer. No-app callers do not fetch the tooling's private
+inputs. Detection uses the Git-tracked flake source, not ignored output or local
+configuration files. Generation keeps the existing 60-minute build-job cap; its subprocess
+also has a 60-minute ceiling and a 16 MiB captured-output buffer limit.
+Toolchain builds/downloads are not reported as scenario execution time.
+
+PRs retain `documentation-RUN_ID-RUN_ATTEMPT` for seven days without replacing
+the live site. A successful default-branch push publishes only the exact retained
+site after all build jobs succeed. The binding records repository, source
+revision, run/attempt, shared-workflow identity, selected system and every file's
+SHA-256. Download uses the producer's artifact ID; verification precedes the
+Pages archive upload. Content is not rebuilt during deployment.
+
+Owners must separately enable a workflow-built **private** Pages site associated
+with their own repository, using the necessary GitHub Enterprise capability.
+Restrict `github-pages` to the default branch and do not configure caller
+concurrency to cancel a default-branch deployment. CI checks `public=false` and
+`build_type=workflow`; a missing/denied/public site is a named setup blocker.
+It never creates a site, changes protections or falls back to public Pages.
+Docs-enabled callers need authorized read access to the shared tooling's private
+`purs-nix` and `purescript-platform` inputs and their locked dependencies; use
+the existing organization-read capability or authorized SSH access. The publisher
+uses only the caller's Pages/OIDC authority, not the read App token.
+
+Deployments are serialized per repository without cancelling an active deploy.
+The publisher records GitHub's returned deployment status URL/ID, polls that
+actual operation, rechecks private configuration/target URL and requires a
+recognizable GitHub authentication redirect for unauthenticated HTTPS access.
+Network errors and public responses cannot report success. A failed or uncertain
+operation is a blocker: reconcile the recorded deployment and last verified
+artifact before retrying or advancing another publication. A Git revert does not
+restore or remove hosted content. The owner separately signs in and verifies the
+intended rendering; API/denial checks do not prove that human observation.
+Publication is neither specification approval nor automated acceptance.
+The producer's run attempt is part of the binding. After reconciling a failed
+publication, rerun the full workflow to generate a current-attempt artifact;
+a failed-job-only rerun must not reuse an artifact from an older attempt.
+
+All reusable-workflow callers must grant `contents: read`, `pages: write` and
+`id-token: write`, even with no docs app. GitHub validates grants before runtime
+conditions. The approved rollout accepts visible startup failures until
+[DEV-1183](https://linear.app/aykua/issue/DEV-1183) supplies the caller grants;
+that organization-wide sweep starts immediately after this shared capability
+merges. A passing granted no-docs smoke caller does not prove every unswept caller
+is compatible. Wider generator migrations are separate work.
+
+The template pilot uses pre-merge local/fixture rejection checks and PR artifact
+generation. No pre-merge hosted deployment has been exercised. First hosted
+publication and real access verification occur after the approved template merge;
+human authenticated rendering review remains a separate acceptance gate.
 
 ## Organization read access
 
@@ -61,6 +135,7 @@ jobs:
     uses: $YOURORG/ci/.github/workflows/workflow.yml@main
     permissions:
       contents: read
+      pages: write
       id-token: write
     with:
       enable-org-read-access: true
@@ -97,6 +172,7 @@ jobs:
     uses: $YOURORG/ci/.github/workflows/workflow.yml@main
     permissions:
       contents: read
+      pages: write
       id-token: write
     with:
       enable-org-read-access: true

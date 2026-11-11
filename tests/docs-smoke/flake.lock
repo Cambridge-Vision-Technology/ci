@@ -1,0 +1,265 @@
+{
+  "nodes": {
+    "ci": {
+      "inputs": {
+        "nixpkgs": "nixpkgs",
+        "platform": "platform",
+        "purescript-whine": "purescript-whine",
+        "purs-nix": "purs-nix"
+      },
+      "locked": {
+        "path": "../..",
+        "type": "path"
+      },
+      "original": {
+        "path": "../..",
+        "type": "path"
+      },
+      "parent": []
+    },
+    "flake-compat": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1767039857,
+        "narHash": "sha256-vNpUSpF5Nuw8xvDLj2KCwwksIbjua2LZCqhV1LNRDns=",
+        "owner": "edolstra",
+        "repo": "flake-compat",
+        "rev": "5edf11c44bc78a0d334f6334cdaf7d60d732daab",
+        "type": "github"
+      },
+      "original": {
+        "owner": "edolstra",
+        "repo": "flake-compat",
+        "type": "github"
+      }
+    },
+    "flake-parts": {
+      "inputs": {
+        "nixpkgs-lib": "nixpkgs-lib"
+      },
+      "locked": {
+        "lastModified": 1772408722,
+        "narHash": "sha256-rHuJtdcOjK7rAHpHphUb1iCvgkU3GpfvicLMwwnfMT0=",
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "rev": "f20dc5d9b8027381c474144ecabc9034d6a839a3",
+        "type": "github"
+      },
+      "original": {
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "type": "github"
+      }
+    },
+    "lint-utils": {
+      "inputs": {
+        "flake-utils": ["ci", "purs-nix", "utils"],
+        "nixpkgs": ["ci", "purs-nix", "nixpkgs"]
+      },
+      "locked": {
+        "lastModified": 1745917180,
+        "narHash": "sha256-PPo7GwCwhENsX5NuxiEdxmy++OoxUpxV+fOpTGaWYoM=",
+        "owner": "homotopic",
+        "repo": "lint-utils",
+        "rev": "62c2fa87ba9620e2d5470d957827175c6e1c128f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "homotopic",
+        "repo": "lint-utils",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1744868846,
+        "narHash": "sha256-5RJTdUHDmj12Qsv7XOhuospjAjATNiTMElplWnJE9Hs=",
+        "rev": "ebe4301cbd8f81c4f8d3244b3632338bbeb6d49c",
+        "revCount": 785333,
+        "type": "tarball",
+        "url": "https://api.flakehub.com/f/pinned/DeterminateSystems/nixpkgs-weekly/0.1.785333%2Brev-ebe4301cbd8f81c4f8d3244b3632338bbeb6d49c/01965c00-a987-7897-9240-abc0268d7590/source.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://flakehub.com/f/DeterminateSystems/nixpkgs-weekly/%2A"
+      }
+    },
+    "nixpkgs-lib": {
+      "locked": {
+        "lastModified": 1772328832,
+        "narHash": "sha256-e+/T/pmEkLP6BHhYjx6GmwP5ivonQQn0bJdH9YrRB+Q=",
+        "owner": "nix-community",
+        "repo": "nixpkgs.lib",
+        "rev": "c185c7a5e5dd8f9add5b2f8ebeff00888b070742",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-community",
+        "repo": "nixpkgs.lib",
+        "type": "github"
+      }
+    },
+    "platform": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794313683,
+        "lfs": true,
+        "narHash": "sha256-gWq3DNW6ocIdI6SuWJRDrtFeWI724Guw/YxgTNgm/jE=",
+        "ref": "main",
+        "rev": "051c9de61def7f5946900328629d0b732d43ff1c",
+        "revCount": 126,
+        "type": "git",
+        "url": "ssh://git@github.com/Cambridge-Vision-Technology/purescript-platform.git"
+      },
+      "original": {
+        "lfs": true,
+        "ref": "main",
+        "type": "git",
+        "url": "ssh://git@github.com/Cambridge-Vision-Technology/purescript-platform.git"
+      }
+    },
+    "ps-tools": {
+      "inputs": {
+        "lint-utils": ["ci", "purs-nix", "lint-utils"],
+        "nixpkgs": ["ci", "purs-nix", "nixpkgs"],
+        "utils": ["ci", "purs-nix", "utils"]
+      },
+      "locked": {
+        "lastModified": 1770243793,
+        "narHash": "sha256-DnX8XJa5YvAYc0+pchI71C0928gLpFX6FtZXI+gbDJE=",
+        "owner": "purs-nix",
+        "repo": "purescript-tools",
+        "rev": "913348dfc63faf105485e492fec0a66bed8d15ab",
+        "type": "github"
+      },
+      "original": {
+        "owner": "purs-nix",
+        "repo": "purescript-tools",
+        "type": "github"
+      }
+    },
+    "purescript-whine": {
+      "inputs": {
+        "flake-compat": "flake-compat",
+        "flake-parts": "flake-parts",
+        "nixpkgs": ["ci", "nixpkgs"],
+        "purs-nix": ["ci", "purs-nix"]
+      },
+      "locked": {
+        "lastModified": 1775033399,
+        "lfs": true,
+        "narHash": "sha256-5/4xPlr+ydZ326ubiKfaGju0z1OKOZEn2csCehXAj6s=",
+        "ref": "main",
+        "rev": "fea51b680d750d304eb0d16e57aeea1c85012111",
+        "revCount": 74,
+        "type": "git",
+        "url": "ssh://git@github.com/Cambridge-Vision-Technology/purescript-whine"
+      },
+      "original": {
+        "lfs": true,
+        "ref": "main",
+        "type": "git",
+        "url": "ssh://git@github.com/Cambridge-Vision-Technology/purescript-whine"
+      }
+    },
+    "purs-nix": {
+      "inputs": {
+        "lint-utils": "lint-utils",
+        "nixpkgs": ["ci", "nixpkgs"],
+        "ps-tools": "ps-tools",
+        "purs-nix-test-packages": "purs-nix-test-packages",
+        "registry": "registry",
+        "utils": "utils"
+      },
+      "locked": {
+        "lastModified": 1786961981,
+        "lfs": true,
+        "narHash": "sha256-a7kujhd+E6ZJYF+VTvSNJnpvKPchRdw/p95H8qXpv38=",
+        "ref": "main",
+        "rev": "12a7bcf1b002ac080c3187eec641332d64b5c2c7",
+        "revCount": 657,
+        "type": "git",
+        "url": "ssh://git@github.com/Cambridge-Vision-Technology/purs-nix"
+      },
+      "original": {
+        "lfs": true,
+        "ref": "main",
+        "type": "git",
+        "url": "ssh://git@github.com/Cambridge-Vision-Technology/purs-nix"
+      }
+    },
+    "purs-nix-test-packages": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1668386728,
+        "narHash": "sha256-no2TtQBsMS7CI7pTrdqq15K4WUghkbAiHdILTyy13vc=",
+        "owner": "purs-nix",
+        "repo": "test-packages",
+        "rev": "fd4a6c6796412cabbc3a03bfa7e4eda92d5e196c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "purs-nix",
+        "ref": "new-api",
+        "repo": "test-packages",
+        "type": "github"
+      }
+    },
+    "registry": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1786867123,
+        "narHash": "sha256-rCwgvALm32/jLowHrd3ZB/VnJebXLfpjwpTSBkY9iNY=",
+        "owner": "purescript",
+        "repo": "registry",
+        "rev": "39a54e2eff6b49e5c8177d883a8a523b761927c7",
+        "type": "github"
+      },
+      "original": {
+        "owner": "purescript",
+        "repo": "registry",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "ci": "ci"
+      }
+    },
+    "systems": {
+      "locked": {
+        "lastModified": 1681028828,
+        "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",
+        "owner": "nix-systems",
+        "repo": "default",
+        "rev": "da67096a3b9bf56a91d16901293e51ba5b49a27e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-systems",
+        "repo": "default",
+        "type": "github"
+      }
+    },
+    "utils": {
+      "inputs": {
+        "systems": "systems"
+      },
+      "locked": {
+        "lastModified": 1731533236,
+        "narHash": "sha256-l0KFg5HjrsfsO/JpG+r7fRrqm12kzFHyUHqHCVpMMbI=",
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "rev": "11707dc2f618dd54ca8739b309ec4fc024de578b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "type": "github"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

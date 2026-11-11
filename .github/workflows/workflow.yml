@@ -140,6 +140,10 @@ jobs:
   build:
     runs-on: ${{ matrix.systems.runner }}
     needs: inventory
+    outputs:
+      docs-present: ${{ steps.docs.outputs.present }}
+      docs-artifact: ${{ steps.docs-upload.outputs.artifact-id }}
+      docs-system: ${{ fromJSON(needs.inventory.outputs.systems)[0].nix-system }}
     # 60, down from 120. The cap exists to stop one job monopolising a runner;
     # at 120 it was too loose to do that. A maintenance darwin build occupied
     # admin-mac-mini — the org's ONLY macOS runner — for 70 minutes against a
@@ -169,7 +173,7 @@ jobs:
       # NOTE on the setup composite at setup/action.yml: that action
       # exists for BESPOKE workflows in other repos to consume directly
       # (e.g. a `tofu plan` job that needs auth + ssh-agent but isn't
-      # shaped like a flake-check). It is NOT consumed by workflow.yml
+      # shaped like a flake-check). It is NOT consumed by this build job
       # because `uses: ./setup` resolves via the workspace (CALLER's repo,
       # not this one) and expressions are forbidden in `uses:`. Credential
       # acquisition is not duplicated: both surfaces run the single
@@ -339,6 +343,16 @@ jobs:
         env:
           CI_NIX_SUBSTITUTERS: ${{ inputs.nix-substituters }}
         run: exec printf '\nsubstituters = %s\n' "$CI_NIX_SUBSTITUTERS" >> "${NIX_USER_CONF_FILES%%:*}"
+      - name: Retain immutable shared tooling source without Git metadata
+        id: docs-source
+        if: ${{ matrix.systems.nix-system == fromJSON(needs.inventory.outputs.systems)[0].nix-system }}
+        run: |
+          nix eval --impure --raw --expr 'let source = builtins.path { path = builtins.toPath (builtins.getEnv "GITHUB_WORKSPACE" + "/.cvt-ci-auth"); name = "cvt-ci-source"; filter = path: type: builtins.baseNameOf path != ".git"; }; in "source=" + toString source + "\n"' >> "$GITHUB_OUTPUT"
+      - name: Keep shared source available until tooling is built
+        if: ${{ matrix.systems.nix-system == fromJSON(needs.inventory.outputs.systems)[0].nix-system }}
+        env:
+          DOCS_TOOL_SOURCE: ${{ steps.docs-source.outputs.source }}
+        run: nix-store --realise "$DOCS_TOOL_SOURCE" --add-root "$RUNNER_TEMP/cvt-ci-docs-source"
       - name: Remove shared authentication checkout
         run: |
           set -euo pipefail
@@ -383,6 +397,20 @@ jobs:
           } >> ~/.ssh/known_hosts
           echo "NIX_SSHOPTS=-o UserKnownHostsFile=$HOME/.ssh/known_hosts" >> "$GITHUB_ENV"
           echo "GIT_SSH_COMMAND=ssh -o UserKnownHostsFile=$HOME/.ssh/known_hosts" >> "$GITHUB_ENV"
+      - name: Detect documentation app on the selected generation system
+        id: docs-detection
+        if: ${{ matrix.systems.nix-system == fromJSON(needs.inventory.outputs.systems)[0].nix-system }}
+        working-directory: ${{ inputs.directory }}
+        env:
+          DOCS_SYSTEM: ${{ matrix.systems.nix-system }}
+          DOCS_TOOL_SOURCE: ${{ steps.docs-source.outputs.source }}
+        run: |
+          nix eval --impure --raw --file "$DOCS_TOOL_SOURCE/nix/docs-app-present.nix" --apply 'present: "present=" + builtins.toJSON present + "\n"' >> "$GITHUB_OUTPUT"
+      - name: Build shared documentation tooling
+        if: ${{ steps.docs-detection.outputs.present == 'true' }}
+        env:
+          DOCS_TOOL_SOURCE: ${{ steps.docs-source.outputs.source }}
+        run: nix build "path:$DOCS_TOOL_SOURCE#docs-tool" --no-write-lock-file --out-link "$RUNNER_TEMP/cvt-docs-tool"
       - name: Create unique diagnostics directory with native name output
         id: diagnostics-directory
         if: ${{ inputs.enable-failure-diagnostics }}
@@ -450,6 +478,26 @@ jobs:
             echo "::error::One or more devShells failed validation"
             exit 1
           fi
+      - name: Generate and validate documentation once
+        id: docs
+        if: ${{ steps.docs-detection.outputs.present == 'true' }}
+        env:
+          DOCS_DIRECTORY: ${{ inputs.directory }}
+          DOCS_SYSTEM: ${{ matrix.systems.nix-system }}
+          DOCS_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          DOCS_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: exec "$RUNNER_TEMP/cvt-docs-tool/bin/ci-docs" generate "$DOCS_DIRECTORY"
+      - name: Retain exact documentation artifact
+        id: docs-upload
+        if: ${{ steps.docs.outputs.present == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: documentation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.docs.outputs.bundle }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
       - name: Snapshot named Linux process identities and current RSS
         id: diagnostics-linux-processes
         if: ${{ !cancelled() && inputs.enable-failure-diagnostics && runner.environment == 'github-hosted' && runner.os == 'Linux' && steps.diagnostics-directory.outcome == 'success' && steps.diagnostics-directory.outputs.name != '' && steps.diagnostics-start.outcome == 'success' && (steps.flake-check.outcome == 'failure' || steps.devshells.outcome == 'failure') }}
@@ -629,9 +677,75 @@ jobs:
         shell: bash
         run: rm -rf "$RUNNER_TEMP/name=${{ steps.diagnostics-directory.outputs.name }}"
 
+  publish-docs:
+    needs: [inventory, build]
+    if: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.build.result == 'success' && needs.build.outputs.docs-present == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: private-pages-${{ github.repository }}
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DOCS_SYSTEM: ${{ needs.build.outputs.docs-system }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+      - uses: ./setup
+        with:
+          checkout: "false"
+          enable-org-read-access: ${{ inputs.enable-org-read-access || inputs.enable-github-app-auth }}
+          org-read-repositories: ${{ inputs.org-read-repositories }}
+          github-app-id: ${{ secrets.github-app-id }}
+          github-app-private-key: ${{ secrets.github-app-private-key }}
+          enable-ssh-agent: ${{ inputs.enable-ssh-agent }}
+          ssh-private-key: ${{ secrets.ssh-private-key }}
+      - name: Download exact producer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.build.outputs.docs-artifact }}
+          path: ${{ runner.temp }}/documentation
+          merge-multiple: true
+      - name: Verify current artifact and existing private site
+        env:
+          DOCS_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          DOCS_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: nix run .#docs-tool -- preflight "$RUNNER_TEMP/documentation"
+      - name: Upload verified site without rebuilding
+        id: pages-artifact
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa
+        with:
+          path: ${{ runner.temp }}/documentation/site
+          name: private-pages-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Deploy verified artifact
+        id: deployment
+        env:
+          PAGES_ARTIFACT: ${{ steps.pages-artifact.outputs.artifact_id }}
+          DOCS_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          DOCS_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: nix run .#docs-tool -- publish "$RUNNER_TEMP/documentation" "$PAGES_ARTIFACT"
+      - name: Retain returned deployment identity even when verification fails
+        if: ${{ always() && steps.deployment.outputs.deployment_id != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: private-pages-deployment-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/private-pages-deployment.json
+          retention-days: 7
+          if-no-files-found: error
+
   success:
     runs-on: ubuntu-latest
-    needs: [inventory, build]
+    needs: [inventory, build, publish-docs]
     timeout-minutes: 5
     if: ${{ always() }}
 
@@ -643,4 +757,4 @@ jobs:
       - run: |
           echo "A dependent in the build matrix failed."
           exit 1
-        if: ${{ needs.inventory.result != 'success' || needs.build.result != 'success' }}
+        if: ${{ needs.inventory.result != 'success' || needs.build.result != 'success' || (needs.publish-docs.result != 'success' && needs.publish-docs.result != 'skipped') }}

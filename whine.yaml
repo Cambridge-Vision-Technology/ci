@@ -1,0 +1,23 @@
+rulePackages:
+  - whine-core
+include:
+  - tools/**/*.purs
+rules:
+  UndesirableModules:
+    modules:
+      Partial: Use total functions and explicit error types
+      Partial.Unsafe: Use total functions and explicit error types
+      Unsafe.Coerce: Preserve type safety
+      Effect.Unsafe: Keep effects explicit
+      Effect.Exception.Unsafe: Use explicit error types
+      Data.String.Regex.Unsafe: Parse regular expressions explicitly
+  UndesirableFunctions:
+    functions:
+      unsafeCoerce: Preserve type safety
+      unsafePartial: Use total functions
+      unsafePerformEffect: Keep effects explicit
+      unsafePerformAff: Keep effects explicit
+      crashWith: Use explicit error types
+  QualifiedImportsOnly: {}
+  MatchingAliases: {}
+  NoDuplicateImports: {}

@@ -72,16 +72,47 @@ jobs:
     uses: ./.github/workflows/workflow.yml
     permissions:
       contents: read
+      pages: write
       id-token: write
     with:
       directory: ./tests/smoke
       # NOTE: This repo's own CI uses GitHub-hosted runners, not the org self-hosted defaults
       runner-map: '{"x86_64-linux": "ubuntu-latest", "aarch64-darwin": "macos-latest"}'
 
+  documentation-checks:
+    uses: ./.github/workflows/workflow.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    with:
+      enable-org-read-access: true
+      runner-map: '{"x86_64-linux": "ubuntu-latest", "aarch64-darwin": "macos-latest"}'
+    secrets:
+      github-app-id: ${{ secrets.CI_FETCH_APP_ID }}
+      github-app-private-key: ${{ secrets.CI_FETCH_APP_PRIVATE_KEY }}
+
+  docs-artifact-smoke:
+    if: ${{ github.event_name == 'pull_request' }}
+    uses: ./.github/workflows/workflow.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    with:
+      enable-org-read-access: true
+      directory: ./tests/docs-smoke
+      runner-map: '{"aarch64-darwin": "macos-latest", "x86_64-linux": "ubuntu-latest"}'
+      check-dev-shells: false
+    secrets:
+      github-app-id: ${{ secrets.CI_FETCH_APP_ID }}
+      github-app-private-key: ${{ secrets.CI_FETCH_APP_PRIVATE_KEY }}
+
   single-build-job-smoke:
     uses: ./.github/workflows/workflow.yml
     permissions:
       contents: read
+      pages: write
       id-token: write
     with:
       directory: ./tests/smoke
@@ -225,6 +256,7 @@ jobs:
     uses: ./.github/workflows/workflow.yml
     permissions:
       contents: read
+      pages: write
       id-token: write
     with:
       enable-org-read-access: true
@@ -893,6 +925,7 @@ jobs:
     uses: ./.github/workflows/workflow.yml
     permissions:
       contents: read
+      pages: write
       id-token: write
     with:
       directory: ./tests/failure-diagnostics/fixture
@@ -907,6 +940,7 @@ jobs:
     uses: ./.github/workflows/workflow.yml
     permissions:
       contents: read
+      pages: write
       id-token: write
     with:
       directory: ./tests/failure-diagnostics/fixture
@@ -919,6 +953,7 @@ jobs:
     uses: ./.github/workflows/workflow.yml
     permissions:
       contents: read
+      pages: write
       id-token: write
     with:
       directory: ./tests/failure-diagnostics/dev-shell-fixture
