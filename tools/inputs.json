@@ -6,5 +6,10 @@
     "tools/CI/Docs/Publication.purs"
   ],
   "fixture": ["tools/CI/Docs/Fixture.purs"],
-  "tests": ["tools/CI/Docs/Test.purs"]
+  "tests": ["tools/CI/Docs/Test.purs"],
+  "transportFixture": [
+    "tools/CI/Docs/TransportFixture.purs",
+    "tools/CI/Docs/Artifact.purs",
+    "tools/CI/Docs/Json.purs"
+  ]
 }

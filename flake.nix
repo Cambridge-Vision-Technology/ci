@@ -18,6 +18,7 @@
 
   outputs =
     {
+      self,
       nixpkgs,
       purs-nix,
       platform,
@@ -30,6 +31,7 @@
       systems = [
         "aarch64-linux"
         "aarch64-darwin"
+        "x86_64-darwin"
         "x86_64-linux"
       ];
 
@@ -164,6 +166,22 @@
         in
         (documentation pkgs).checks
         // {
+          docs-platform-exports =
+            assert lib.all
+              (
+                system:
+                builtins.hasAttr "docs-tool" self.packages.${system} && self.apps.${system}.docs-tool.type == "app"
+              )
+              [
+                "x86_64-linux"
+                "aarch64-linux"
+                "aarch64-darwin"
+                "x86_64-darwin"
+              ];
+            pkgs.runCommand "docs-platform-exports" { } ''
+              set -euo pipefail
+              exec ${pkgs.coreutils}/bin/touch "$out"
+            '';
           actionlint =
             pkgs.runCommand "actionlint"
               {

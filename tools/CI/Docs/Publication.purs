@@ -57,7 +57,7 @@ preflightWith get event ref bundle identity = do
 
 deployed :: CI.Docs.Json.Binding -> String -> String -> Effect.Effect Unit
 deployed identity deployment url = do
-  deployedWith getApi probeAccess
+  deployedWith getApi probeAccess (\_ -> pure unit)
     identity
     deployment
     url
@@ -65,10 +65,11 @@ deployed identity deployment url = do
 probeAccess :: String -> Effect.Effect String
 probeAccess target = CI.Docs.Artifact.text "curl" [ "--disable", "--silent", "--show-error", "--proto", "=https", "--max-time", "30", "--dump-header", "-", "--output", "/dev/null", target ]
 
-deployedWith :: (String -> Effect.Effect String) -> (String -> Effect.Effect String) -> CI.Docs.Json.Binding -> String -> String -> Effect.Effect Unit
-deployedWith get probe identity deployment url = do
+deployedWith :: (String -> Effect.Effect String) -> (String -> Effect.Effect String) -> (String -> Effect.Effect Unit) -> CI.Docs.Json.Binding -> String -> String -> Effect.Effect Unit
+deployedWith get probe observe identity deployment url = do
   CI.Docs.Artifact.ensure (deployment /= "" && Data.Array.all (\c -> (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-') (Data.String.CodeUnits.toCharArray deployment)) "Missing or invalid Pages deployment ID"
   status <- get ("repos/" <> identity.repository <> "/pages/deployments/" <> deployment) >>= CI.Docs.Artifact.parse :: Effect.Effect Deployment
+  observe status.status
   CI.Docs.Artifact.ensure (status.status == "succeed") "Pages deployment verification failed"
   site <- privateSiteWith get identity
   CI.Docs.Artifact.ensure (url == site.html_url) "Pages deployment URL differs from associated private site"
@@ -102,7 +103,7 @@ publish :: String -> String -> CI.Docs.Json.Binding -> Effect.Effect Unit
 publish bundle artifact identity = do
   event <- required "GITHUB_EVENT_NAME"
   ref <- required "GITHUB_REF"
-  publishWith { get: getApi, probe: probeAccess, create, record, verified, wait: void (CI.Docs.Artifact.text "sleep" [ "5" ]) } event ref bundle artifact identity
+  publishWith { get: getApi, probe: probeAccess, create, record: record bundle artifact, observed, verified, wait: void (CI.Docs.Artifact.text "sleep" [ "5" ]) } event ref bundle artifact identity
 
 type Client =
   { get :: String -> Effect.Effect String
@@ -110,6 +111,7 @@ type Client =
   , create :: CI.Docs.Json.Binding -> Number -> Effect.Effect Created
   , record :: String -> String -> Effect.Effect Unit
   , verified :: Effect.Effect Unit
+  , observed :: String -> Effect.Effect Unit
   , wait :: Effect.Effect Unit
   }
 
@@ -125,15 +127,16 @@ publishWith client event ref bundle artifact identity = do
   CI.Docs.Artifact.ensure (deployment /= "" && Data.Array.all (\c -> (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-') (Data.String.CodeUnits.toCharArray deployment)) "Invalid returned Pages deployment ID"
   client.record deployment created.page_url
   poll 100 deployment
-  deployedWith client.get client.probe identity deployment created.page_url
+  deployedWith client.get client.probe client.observed identity deployment created.page_url
   client.verified
   where
   poll remaining deployment = do
     CI.Docs.Artifact.ensure (remaining > 0) "Pages deployment verification deadline reached; reconcile the recorded deployment before retrying"
     status <- client.get ("repos/" <> identity.repository <> "/pages/deployments/" <> deployment) >>= CI.Docs.Artifact.parse :: Effect.Effect Deployment
+    client.observed status.status
     if status.status == "succeed" then pure unit
     else do
-      CI.Docs.Artifact.ensure (Data.Array.elem status.status [ "queued", "deployment_in_progress", "waiting", "pending", "deployment_queued" ]) ("Pages deployment failed or unknown: " <> status.status)
+      CI.Docs.Artifact.ensure (Data.Array.elem status.status [ "deployment_in_progress", "syncing_files", "finished_file_sync", "updating_pages", "purging_cdn", "deployment_attempt_error" ]) ("Pages deployment failed or unknown: " <> status.status)
       client.wait
       poll (remaining - 1) deployment
 
@@ -141,17 +144,14 @@ create :: CI.Docs.Json.Binding -> Number -> Effect.Effect Created
 create identity artifactId = do
   oidcUrl <- required "ACTIONS_ID_TOKEN_REQUEST_URL"
   oidcToken <- required "ACTIONS_ID_TOKEN_REQUEST_TOKEN"
-  fetched <- Effect.Exception.try
-    ( CI.Docs.Artifact.text "curl"
-        [ "--disable", "--fail", "--silent", "--show-error", "--proto", "=https", "--max-time", "30", "--header", "Authorization: bearer " <> oidcToken, oidcUrl ]
-    )
-  token <- case fetched of
-    Data.Either.Left _ ->
-      Effect.Exception.throw "Pages OIDC acquisition failed"
-    Data.Either.Right value -> do
-      decoded <- Effect.Exception.try (CI.Docs.Artifact.parse value :: Effect.Effect Oidc)
-      Data.Either.either (\_ -> Effect.Exception.throw "Pages OIDC response invalid") pure decoded
+  CI.Docs.Artifact.ensure (not (Data.String.contains (Data.String.Pattern "\n") oidcToken || Data.String.contains (Data.String.Pattern "\r") oidcToken)) "Invalid Pages OIDC request credential"
   environment <- Node.Process.getEnv
+  fetched <- Effect.Uncurried.runEffectFn3 Platform.Node.System.executeWithImpl "curl"
+    [ "--disable", "--fail", "--silent", "--show-error", "--proto", "=https", "--max-time", "30", "--header", "@-", oidcUrl ]
+    { encoding: "utf8", timeout: 30000, maxBuffer: 1048576, killSignal: "SIGTERM", input: "Authorization: bearer " <> oidcToken <> "\n", cwd: ".", env: environment }
+  CI.Docs.Artifact.ensure (Data.Nullable.toMaybe fetched.status == Data.Maybe.Just 0) "Pages OIDC acquisition failed"
+  decodedToken <- Effect.Exception.try (CI.Docs.Artifact.parse (Data.Maybe.fromMaybe "" (Data.Nullable.toMaybe fetched.stdout)) :: Effect.Effect Oidc)
+  token <- Data.Either.either (\_ -> Effect.Exception.throw "Pages OIDC response invalid") pure decodedToken
   let
     payload = Data.Argonaut.Core.stringify
       ( Data.Argonaut.Encode.encodeJson
@@ -163,8 +163,8 @@ create identity artifactId = do
   CI.Docs.Artifact.ensure (Data.Nullable.toMaybe response.status == Data.Maybe.Just 0) "Pages deployment creation failed or uncertain; inspect deployment state before retrying"
   CI.Docs.Artifact.parse (Data.Maybe.fromMaybe "" (Data.Nullable.toMaybe response.stdout))
 
-record :: String -> String -> Effect.Effect Unit
-record deployment url = do
+record :: String -> String -> String -> String -> Effect.Effect Unit
+record bundle pagesArtifact deployment url = do
   outputPath <- required "GITHUB_OUTPUT"
   old <- Platform.Node.Build.readImpl outputPath
   CI.Docs.Artifact.ensure (Data.String.contains (Data.String.Pattern "\n") url == false && Data.String.contains (Data.String.Pattern "\r") url == false) "Invalid Pages URL"
@@ -173,17 +173,26 @@ record deployment url = do
   revision <- required "GITHUB_SHA"
   run <- required "GITHUB_RUN_ID"
   attempt <- required "GITHUB_RUN_ATTEMPT"
+  producerArtifact <- required "DOCS_PRODUCER_ARTIFACT_ID"
+  bindingHash <- CI.Docs.Artifact.text "sha256sum" [ bundle <> "/binding.json" ]
   let
-    evidence = Data.Argonaut.Core.stringify (Data.Argonaut.Encode.encodeJson { repository, revision, run, attempt, deployment, url, status: "created-not-yet-verified", privateAccess: "not-yet-verified" })
+    bindingDigest = Data.String.CodeUnits.take 64 bindingHash
+    evidence = Data.Argonaut.Core.stringify (Data.Argonaut.Encode.encodeJson { repository, revision, run, attempt, deployment, url, producerArtifact, pagesArtifact, bindingDigest, status: "created-not-yet-verified", privateAccess: "not-yet-verified", lastStatus: "created" })
   Platform.Node.Build.writeImpl (temporary <> "/private-pages-deployment.json") evidence
   Build.Output.writeLine Node.Process.stdout evidence (pure unit)
   Platform.Node.Build.writeImpl outputPath (old <> "deployment_id=" <> deployment <> "\npage_url=" <> url <> "\n")
+
+observed :: String -> Effect.Effect Unit
+observed status = do
+  temporary <- required "RUNNER_TEMP"
+  evidence <- Platform.Node.Build.readImpl (temporary <> "/private-pages-deployment.json") >>= CI.Docs.Artifact.parse :: Effect.Effect CI.Docs.Json.DeploymentEvidence
+  Platform.Node.Build.writeImpl (temporary <> "/private-pages-deployment.json") (Data.Argonaut.Core.stringify (Data.Argonaut.Encode.encodeJson (evidence { lastStatus = status })))
 
 verified :: Effect.Effect Unit
 verified = do
   temporary <- required "RUNNER_TEMP"
   evidence <- Platform.Node.Build.readImpl (temporary <> "/private-pages-deployment.json") >>= CI.Docs.Artifact.parse :: Effect.Effect CI.Docs.Json.DeploymentEvidence
   let
-    result = Data.Argonaut.Core.stringify (Data.Argonaut.Encode.encodeJson (evidence { status = "succeed", privateAccess = "denied" }))
+    result = Data.Argonaut.Core.stringify (Data.Argonaut.Encode.encodeJson (evidence { status = "succeed", privateAccess = "denied", lastStatus = "succeed" }))
   Platform.Node.Build.writeImpl (temporary <> "/private-pages-deployment.json") result
   Build.Output.writeLine Node.Process.stdout result (pure unit)

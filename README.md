@@ -102,6 +102,12 @@ artifact before retrying or advancing another publication. A Git revert does not
 restore or remove hosted content. The owner separately signs in and verifies the
 intended rendering; API/denial checks do not prove that human observation.
 Publication is neither specification approval nor automated acceptance.
+The retained record also binds producer/Pages artifact IDs, the binding-file
+digest and last observed deployment status. Documented file-sync, Pages-update
+and CDN-purge states continue polling. `deployment_attempt_error` gets bounded
+status-read retries without another creation request; exhaustion, terminal
+failure or an unknown state fails verification. OIDC request authorization and
+the deployment JWT use stdin transport, not credential-bearing argv.
 The producer's run attempt is part of the binding. After reconciling a failed
 publication, rerun the full workflow to generate a current-attempt artifact;
 a failed-job-only rerun must not reuse an artifact from an older attempt.
@@ -320,6 +326,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      pages: write
     with:
       runner-map: |
         {
@@ -354,6 +361,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      pages: write
     with:
       enable-ssh-agent: true
     secrets:
@@ -372,6 +380,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      pages: write
     with:
       fail-fast: false
 ```
