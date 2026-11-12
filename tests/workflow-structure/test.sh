@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Quiet/early-exiting consumers read strings directly, never from a producer
+# pipe: finding a match must not turn the producer's SIGPIPE into a false failure.
+# Remaining filtering pipelines drain their input and discard only stdout.
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 WORKFLOW="$REPO_ROOT/.github/workflows/workflow.yml"
 ACTIONLINT_CONFIG="$REPO_ROOT/.github/actionlint.yaml"
@@ -69,7 +73,7 @@ else
   pass "no flakehub-push references"
 fi
 
-if grep -i 'flake-iter' "$WORKFLOW" | grep -v 'DEPRECATED' | grep -v 'flake-iter-flakeref:' | grep -qi 'flake-iter'; then
+if grep -i 'flake-iter' "$WORKFLOW" | grep -v 'DEPRECATED' | grep -v 'flake-iter-flakeref:' | grep -i 'flake-iter' > /dev/null; then
   fail "workflow still references flake-iter (outside deprecated inputs)"
 else
   pass "no flake-iter references (outside deprecated inputs)"
@@ -163,7 +167,7 @@ while IFS= read -r line; do
   fi
 done < "$WORKFLOW"
 
-if echo "$validate_devshells_block" | grep -q '2>/dev/null'; then
+if grep -q '2>/dev/null' <<< "$validate_devshells_block"; then
   fail "Validate devShells step contains 2>/dev/null (silently swallows errors)"
 else
   pass "Validate devShells step does not contain 2>/dev/null"
@@ -171,7 +175,7 @@ fi
 
 # --- nix eval fallback must distinguish missing-attribute from real failures ---
 
-if echo "$validate_devshells_block" | grep -qE "\|\| echo '\[\]'"; then
+if grep -qE "\|\| echo '\[\]'" <<< "$validate_devshells_block"; then
   fail "Validate devShells step uses bare '|| echo []' fallback (masks genuine nix eval failures)"
 else
   pass "Validate devShells step does not use bare '|| echo []' fallback"
@@ -179,7 +183,7 @@ fi
 
 # --- Validate devShells checks for missing-attribute error specifically ---
 
-if echo "$validate_devshells_block" | grep -q 'does not provide attribute'; then
+if grep -q 'does not provide attribute' <<< "$validate_devshells_block"; then
   pass "Validate devShells step checks for 'does not provide attribute' error"
 else
   fail "Validate devShells step does not check for 'does not provide attribute' error (missing-attribute detection needed)"
@@ -226,7 +230,7 @@ done
 
 # --- check-dev-shells defaults to true ---
 
-if grep -A8 'check-dev-shells:' "$WORKFLOW" | grep -q 'default: true'; then
+if grep -A8 'check-dev-shells:' "$WORKFLOW" | grep 'default: true' > /dev/null; then
   pass "check-dev-shells defaults to true"
 else
   fail "check-dev-shells does not default to true"
@@ -234,7 +238,7 @@ fi
 
 # --- Validate devShells step has correct if condition ---
 
-if grep -B1 -A1 'name: Validate devShells' "$WORKFLOW" | grep -q "if: \${{ inputs.check-dev-shells }}"; then
+if grep -B1 -A1 'name: Validate devShells' "$WORKFLOW" | grep "if: \${{ inputs.check-dev-shells }}" > /dev/null; then
   pass "Validate devShells step has correct if condition"
 else
   fail "Validate devShells step does not have correct if condition"
@@ -276,14 +280,14 @@ else
   fail "stale credential cleanup must run before actions/checkout"
 fi
 
-if echo "$cleanup_block" | grep -qF 'http.https://github.com/.extraHeader' &&
-  echo "$cleanup_block" | grep -qF 'url.https://github.com/.insteadOf'; then
+if grep -qF 'http.https://github.com/.extraHeader' <<< "$cleanup_block" &&
+  grep -qF 'url.https://github.com/.insteadOf' <<< "$cleanup_block"; then
   pass "stale credential cleanup unsets both extraHeader and insteadOf"
 else
   fail "stale credential cleanup does not unset both extraHeader and insteadOf"
 fi
 
-if echo "$cleanup_block" | grep -qF -- '-ne 5'; then
+if grep -qF -- '-ne 5' <<< "$cleanup_block"; then
   pass "stale credential cleanup handles git config --unset-all status 5 explicitly"
 else
   fail "stale credential cleanup does not handle git config --unset-all status 5 explicitly"
@@ -297,26 +301,26 @@ fi
 
 # --- Organization read access capability ---
 
-if grep -A8 '^      enable-org-read-access:' "$WORKFLOW" | grep -q 'default: false'; then
+if grep -A8 '^      enable-org-read-access:' "$WORKFLOW" | grep 'default: false' > /dev/null; then
   pass "enable-org-read-access input is opt-in by default"
 else
   fail "enable-org-read-access input is missing or not opt-in by default"
 fi
 
-if grep -A8 '^      enable-github-app-auth:' "$WORKFLOW" | grep -q 'default: false'; then
+if grep -A8 '^      enable-github-app-auth:' "$WORKFLOW" | grep 'default: false' > /dev/null; then
   pass "deprecated enable-github-app-auth alias is still declared and opt-in"
 else
   fail "deprecated enable-github-app-auth alias is missing or not opt-in"
 fi
 
-if grep -A3 '^      enable-github-app-auth:' "$WORKFLOW" | grep -q 'DEPRECATED'; then
+if grep -A3 '^      enable-github-app-auth:' "$WORKFLOW" | grep 'DEPRECATED' > /dev/null; then
   pass "enable-github-app-auth is documented as deprecated"
 else
   fail "enable-github-app-auth is not documented as deprecated"
 fi
 
 for secret_name in ssh-private-key github-app-id github-app-private-key; do
-  if grep -A2 "^      ${secret_name}:" "$WORKFLOW" | grep -q 'required: false'; then
+  if grep -A2 "^      ${secret_name}:" "$WORKFLOW" | grep 'required: false' > /dev/null; then
     pass "secret stays optional: $secret_name"
   else
     fail "secret is not declared optional: $secret_name"
@@ -334,27 +338,27 @@ fi
 
 app_token_block="$(extract_named_build_step 'Mint GitHub App organization installation token')"
 
-if echo "$app_token_block" | grep -qF 'if: ${{ inputs.enable-org-read-access || inputs.enable-github-app-auth }}'; then
+if grep -qF 'if: ${{ inputs.enable-org-read-access || inputs.enable-github-app-auth }}' <<< "$app_token_block"; then
   pass "App token minting is alias-aware and opt-in"
 else
   fail "App token minting is not gated on both the capability input and its deprecated alias"
 fi
 
-if echo "$app_token_block" | grep -qF 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0'; then
+if grep -qF 'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0' <<< "$app_token_block"; then
   pass "GitHub App token action is pinned to v3.2.0 commit"
 else
   fail "GitHub App token action is not pinned to the required v3.2.0 commit"
 fi
 
-if echo "$app_token_block" | grep -qF 'app-id: ${{ secrets.github-app-id }}' &&
-  echo "$app_token_block" | grep -qF 'private-key: ${{ secrets.github-app-private-key }}' &&
-  echo "$app_token_block" | grep -qF 'owner: ${{ github.repository_owner }}'; then
+if grep -qF 'app-id: ${{ secrets.github-app-id }}' <<< "$app_token_block" &&
+  grep -qF 'private-key: ${{ secrets.github-app-private-key }}' <<< "$app_token_block" &&
+  grep -qF 'owner: ${{ github.repository_owner }}' <<< "$app_token_block"; then
   pass "GitHub App token uses caller credentials for the repository owner installation"
 else
   fail "GitHub App token does not use caller credentials and repository owner installation"
 fi
 
-if echo "$app_token_block" | grep -qF 'permission-contents: read'; then
+if grep -qF 'permission-contents: read' <<< "$app_token_block"; then
   pass "GitHub App token is downscoped to contents: read"
 else
   fail "GitHub App token is not downscoped to contents: read"
@@ -396,13 +400,13 @@ fi
 scope_input_block="$(extract_workflow_input org-read-repositories)"
 scope_description="$(printf '%s\n' "$scope_input_block" | tr '\n' ' ' | tr -s ' ')"
 
-if printf '%s\n' "$scope_input_block" | grep -qE '^[[:space:]]+required: false[[:space:]]*$'; then
+if grep -qE '^[[:space:]]+required: false[[:space:]]*$' <<< "$scope_input_block"; then
   pass "org-read-repositories stays optional on the workflow"
 else
   fail "org-read-repositories is not optional on the workflow, so every existing call site would have to pass it"
 fi
 
-if printf '%s\n' "$scope_input_block" | grep -qE '^[[:space:]]+default: ""[[:space:]]*$'; then
+if grep -qE '^[[:space:]]+default: ""[[:space:]]*$' <<< "$scope_input_block"; then
   pass "org-read-repositories defaults to empty, which is the organization-wide token this workflow mints today"
 else
   fail "org-read-repositories does not default to empty, so it would change the behaviour of existing callers"
@@ -410,7 +414,7 @@ fi
 
 # A list of names is a string, not a boolean. A workflow_call input with the
 # wrong type is a startup failure at every call site that sets it.
-if printf '%s\n' "$scope_input_block" | grep -qE '^[[:space:]]+type: string[[:space:]]*$'; then
+if grep -qE '^[[:space:]]+type: string[[:space:]]*$' <<< "$scope_input_block"; then
   pass "org-read-repositories is declared as a string, matching the list the App token action parses"
 else
   fail "org-read-repositories is not declared type: string"
@@ -422,7 +426,7 @@ else
   fail "the workflow does not document what the empty default of org-read-repositories means"
 fi
 
-if echo "$app_token_block" | grep -qF 'repositories: ${{ inputs.org-read-repositories }}'; then
+if grep -qF 'repositories: ${{ inputs.org-read-repositories }}' <<< "$app_token_block"; then
   pass "the workflow wires org-read-repositories to create-github-app-token's repositories input"
 else
   fail "the workflow declares org-read-repositories but never wires it to create-github-app-token's repositories input"
@@ -445,7 +449,7 @@ else
   fail "the workflow has $workflow_scope_fallbacks fallback expressions on the repositories input, which would narrow the default path"
 fi
 
-workflow_mint_owner_line="$(echo "$app_token_block" | awk 'index($0, "owner:") { sub(/^[[:space:]]*/, ""); print; exit }')"
+workflow_mint_owner_line="$(awk 'index($0, "owner:") { sub(/^[[:space:]]*/, ""); print; exit }' <<< "$app_token_block")"
 if [ "$workflow_mint_owner_line" = 'owner: ${{ github.repository_owner }}' ]; then
   pass "the workflow still mints against the whole owner installation, unconditionally"
 else
@@ -455,7 +459,7 @@ fi
 # Setting only the scope must mint nothing: the capability input and its
 # deprecated alias alone decide whether a token exists, and the scope decides
 # only how wide it is.
-workflow_mint_gate_line="$(echo "$app_token_block" | awk 'index($0, "if:") { sub(/^[[:space:]]*/, ""); print; exit }')"
+workflow_mint_gate_line="$(awk 'index($0, "if:") { sub(/^[[:space:]]*/, ""); print; exit }' <<< "$app_token_block")"
 if [ "$workflow_mint_gate_line" = 'if: ${{ inputs.enable-org-read-access || inputs.enable-github-app-auth }}' ]; then
   pass "the mint gate is unchanged: only the capability input and its deprecated alias decide whether a token is minted"
 else
@@ -474,14 +478,14 @@ done
 
 delegation_block="$(extract_named_build_step 'Check out shared authentication implementation')"
 
-if echo "$delegation_block" | grep -qF 'repository: ${{ job.workflow_repository }}' &&
-  echo "$delegation_block" | grep -qF 'ref: ${{ job.workflow_sha }}'; then
+if grep -qF 'repository: ${{ job.workflow_repository }}' <<< "$delegation_block" &&
+  grep -qF 'ref: ${{ job.workflow_sha }}' <<< "$delegation_block"; then
   pass "delegation checks out this repository at the caller-selected revision"
 else
   fail "delegation does not check out job.workflow_repository at job.workflow_sha"
 fi
 
-if echo "$delegation_block" | grep -qF 'path: .cvt-ci-auth'; then
+if grep -qF 'path: .cvt-ci-auth' <<< "$delegation_block"; then
   pass "delegation checkout is confined to a workspace subpath"
 else
   fail "delegation checkout is not confined to a workspace subpath"
@@ -503,19 +507,19 @@ fi
 
 authenticate_block="$(extract_named_build_step 'Authenticate git and Nix to github.com')"
 
-if echo "$authenticate_block" | grep -qF '.cvt-ci-auth/auth/authenticate.sh'; then
+if grep -qF '.cvt-ci-auth/auth/authenticate.sh' <<< "$authenticate_block"; then
   pass "authentication step invokes the shared auth/authenticate.sh"
 else
   fail "authentication step does not invoke the shared auth/authenticate.sh"
 fi
 
-if echo "$authenticate_block" | grep -qF 'ORG_READ_TOKEN: ${{ (inputs.enable-org-read-access || inputs.enable-github-app-auth) && steps.github-app-token.outputs.token || github.token }}'; then
+if grep -qF 'ORG_READ_TOKEN: ${{ (inputs.enable-org-read-access || inputs.enable-github-app-auth) && steps.github-app-token.outputs.token || github.token }}' <<< "$authenticate_block"; then
   pass "authentication step selects the App token when either capability input is set"
 else
   fail "authentication step does not select the App token in an alias-aware way"
 fi
 
-if echo "$authenticate_block" | grep -qF 'ORG_READ_ACCESS_ENABLED: ${{ inputs.enable-org-read-access || inputs.enable-github-app-auth }}'; then
+if grep -qF 'ORG_READ_ACCESS_ENABLED: ${{ inputs.enable-org-read-access || inputs.enable-github-app-auth }}' <<< "$authenticate_block"; then
   pass "the shared script is told the token is organization-wide only when either capability input is set"
 else
   fail "the organization-access flag passed to the shared script is not alias-aware or not conditional"
@@ -553,7 +557,7 @@ consumer_checkout_block="$(awk '
   { print }
 ' "$WORKFLOW")"
 
-if echo "$consumer_checkout_block" | grep -qF 'persist-credentials'; then
+if grep -qF 'persist-credentials' <<< "$consumer_checkout_block"; then
   fail "the consumer checkout disables persisted credentials, which changes the default repository-token path and still would not cover auth/action.yml"
 else
   pass "the consumer checkout keeps its own credential handling"
@@ -561,7 +565,7 @@ fi
 
 # The delegation checkout is this repository's own, fetched only to reach the
 # shared script, so it has no business leaving a credential behind at all.
-if echo "$delegation_block" | grep -qF 'persist-credentials: false'; then
+if grep -qF 'persist-credentials: false' <<< "$delegation_block"; then
   pass "the delegation checkout persists no credentials of its own"
 else
   fail "the delegation checkout persists credentials into the workspace"
@@ -574,7 +578,7 @@ else
   fail "the workflow has $local_git_config_writes local git config statements, duplicating the shared implementation"
 fi
 
-if echo "$authenticate_block" | grep -qF 'ORG_READ_OWNER: ${{ github.repository_owner }}'; then
+if grep -qF 'ORG_READ_OWNER: ${{ github.repository_owner }}' <<< "$authenticate_block"; then
   pass "authentication step scopes Nix access tokens to the repository owner"
 else
   fail "authentication step does not scope Nix access tokens to the repository owner"
@@ -584,7 +588,7 @@ remove_block="$(extract_named_build_step 'Remove shared authentication checkout'
 remove_line="$(line_of 'name: Remove shared authentication checkout' "$WORKFLOW")"
 authenticate_line="$(line_of 'name: Authenticate git and Nix to github.com' "$WORKFLOW")"
 
-if echo "$remove_block" | grep -qF 'rm -rf "$GITHUB_WORKSPACE/.cvt-ci-auth"' &&
+if grep -qF 'rm -rf "$GITHUB_WORKSPACE/.cvt-ci-auth"' <<< "$remove_block" &&
   [[ -n "$remove_line" && -n "$authenticate_line" && "$remove_line" -gt "$authenticate_line" ]]; then
   pass "delegation checkout is removed after authentication"
 else
@@ -616,7 +620,7 @@ detect_nix_block="$(extract_named_build_step 'Detect existing Nix')"
 detect_nix_line="$(line_of 'name: Detect existing Nix' "$WORKFLOW")"
 install_nix_line="$(line_of 'name: Install Nix when absent' "$WORKFLOW")"
 
-if echo "$detect_nix_block" | grep -qE '^[[:space:]]*id:[[:space:]]*nix-detection[[:space:]]*$'; then
+if grep -qE '^[[:space:]]*id:[[:space:]]*nix-detection[[:space:]]*$' <<< "$detect_nix_block"; then
   pass "Nix detection step has id: nix-detection"
 else
   fail "Nix detection step does not have id: nix-detection"
@@ -660,19 +664,19 @@ else
   fail "Nix detection must write present=true only after command -v nix succeeds and present=false in its else branch"
 fi
 
-if echo "$install_nix_block" | grep -qF "if: \${{ steps.nix-detection.outputs.present != 'true' }}"; then
+if grep -qF "if: \${{ steps.nix-detection.outputs.present != 'true' }}" <<< "$install_nix_block"; then
   pass "upstream installation runs only when Nix is absent"
 else
   fail "upstream installation is not conditional on absent Nix"
 fi
 
-if echo "$install_nix_block" | grep -qF 'cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0'; then
+if grep -qF 'cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0' <<< "$install_nix_block"; then
   pass "upstream installer is pinned to cachix/install-nix-action v31.11.0"
 else
   fail "upstream installer is not pinned to cachix/install-nix-action v31.11.0"
 fi
 
-if echo "$install_nix_block" | grep -qF 'github_access_token: ${{ (inputs.enable-org-read-access || inputs.enable-github-app-auth) && steps.github-app-token.outputs.token || github.token }}'; then
+if grep -qF 'github_access_token: ${{ (inputs.enable-org-read-access || inputs.enable-github-app-auth) && steps.github-app-token.outputs.token || github.token }}' <<< "$install_nix_block"; then
   pass "upstream installer token selection is alias-aware"
 else
   fail "upstream installer token selection is not alias-aware"
@@ -729,19 +733,19 @@ for guard_surface in "$WORKFLOW" "$SETUP_ACTION"; do
   # floor has exactly one outcome, an annotated error and a non-zero exit.
   guard_body="$(extract_guard_body "$guard_surface")"
 
-  if echo "$guard_body" | grep -qF '::warning::'; then
+  if grep -qF '::warning::' <<< "$guard_body"; then
     fail "the guard in $guard_surface_label has a soft-warning path; below the floor must always fail"
   else
     pass "the guard in $guard_surface_label has no soft-warning path"
   fi
 
-  if echo "$guard_body" | grep -qF 'RUNNER_OS'; then
+  if grep -qF 'RUNNER_OS' <<< "$guard_body"; then
     fail "the guard in $guard_surface_label branches on the platform, which exempts a runner from the floor"
   else
     pass "the guard in $guard_surface_label never branches on the platform"
   fi
 
-  if echo "$guard_body" | grep -qi 'defer'; then
+  if grep -qi 'defer' <<< "$guard_body"; then
     fail "the guard in $guard_surface_label still carries a deferral exemption"
   else
     pass "the guard in $guard_surface_label carries no deferral exemption"
@@ -780,7 +784,7 @@ done
 guard_block="$(extract_named_build_step 'Verify Nix meets the minimum supported version')"
 guard_line="$(line_of "$guard_step_name" "$WORKFLOW")"
 
-if echo "$guard_block" | grep -qF 'RUNNER_LABEL: ${{ matrix.systems.runner }}'; then
+if grep -qF 'RUNNER_LABEL: ${{ matrix.systems.runner }}' <<< "$guard_block"; then
   pass "the guard names the matrix runner label it is running on"
 else
   fail "the guard does not name the matrix runner label it is running on"
@@ -829,7 +833,7 @@ for contract_test in \
   tests/runner-map-transform/test.sh \
   tests/setup-action-structure/test.sh \
   tests/workflow-structure/test.sh; do
-  if echo "$contract_test_block" | grep -qF "$contract_test"; then
+  if grep -qF "$contract_test" <<< "$contract_test_block"; then
     pass "pull-request CI runs $contract_test"
   else
     fail "pull-request CI does not run $contract_test"
@@ -878,7 +882,7 @@ extract_validate_job() {
   ' "$VALIDATE"
 }
 
-if grep -A10 '^      run-org-read-probes:' "$VALIDATE" | grep -qF 'default: false'; then
+if grep -A10 '^      run-org-read-probes:' "$VALIDATE" | grep -F 'default: false' > /dev/null; then
   pass "the run-org-read-probes dispatch input defaults to false"
 else
   fail "the run-org-read-probes dispatch input is missing or does not default to false"
@@ -915,19 +919,19 @@ for probe_job in "${probe_jobs[@]}"; do
   # Two independent reasons a pull request cannot reach this job: the event name
   # is pinned to workflow_dispatch, and the opt-in input only exists on that
   # event. Either alone would do; both are asserted so removing one is caught.
-  if echo "$probe_block" | grep -qF "github.event_name == 'workflow_dispatch'"; then
+  if grep -qF "github.event_name == 'workflow_dispatch'" <<< "$probe_block"; then
     pass "$probe_job is gated on the workflow_dispatch event"
   else
     fail "$probe_job is not gated on the workflow_dispatch event, so a pull request could run it"
   fi
 
-  if echo "$probe_block" | grep -qF 'inputs.run-org-read-probes'; then
+  if grep -qF 'inputs.run-org-read-probes' <<< "$probe_block"; then
     pass "$probe_job is gated on the explicit run-org-read-probes opt-in"
   else
     fail "$probe_job is not gated on the run-org-read-probes opt-in, so a plain dispatch would run it"
   fi
 
-  if echo "$probe_block" | grep -qE '^[[:space:]]*needs:'; then
+  if grep -qE '^[[:space:]]*needs:' <<< "$probe_block"; then
     fail "$probe_job declares needs:, which can drag it into an ungated run"
   else
     pass "$probe_job depends on no other job"
@@ -985,7 +989,7 @@ fi
 # been added by gating normal CI instead.
 for ordinary_job in lints ci setup-composite-smoke; do
   ordinary_block="$(extract_validate_job "$ordinary_job")"
-  if echo "$ordinary_block" | grep -qF 'run-org-read-probes'; then
+  if grep -qF 'run-org-read-probes' <<< "$ordinary_block"; then
     fail "ordinary validation job $ordinary_job is gated on the probe opt-in"
   else
     pass "ordinary validation job $ordinary_job is not gated on the probe opt-in"
@@ -998,7 +1002,7 @@ done
 # narrowed token and leave the default unproven.
 scoped_probe_jobs=""
 for probe_job in "${probe_jobs[@]}"; do
-  if extract_validate_job "$probe_job" | grep -qF 'org-read-repositories'; then
+  if extract_validate_job "$probe_job" | grep -F 'org-read-repositories' > /dev/null; then
     scoped_probe_jobs="$scoped_probe_jobs$probe_job "
   fi
 done
@@ -1012,25 +1016,25 @@ fi
 
 reusable_probe_block="$(extract_validate_job probe-reusable-workflow-org-read)"
 
-if echo "$reusable_probe_block" | grep -qF 'uses: ./.github/workflows/workflow.yml'; then
+if grep -qF 'uses: ./.github/workflows/workflow.yml' <<< "$reusable_probe_block"; then
   pass "the reusable-workflow probe exercises the reusable workflow surface"
 else
   fail "the reusable-workflow probe does not call the reusable workflow"
 fi
 
-if echo "$reusable_probe_block" | grep -qF 'enable-org-read-access: true'; then
+if grep -qF 'enable-org-read-access: true' <<< "$reusable_probe_block"; then
   pass "the reusable-workflow probe enables organization read access"
 else
   fail "the reusable-workflow probe does not enable organization read access"
 fi
 
-if echo "$reusable_probe_block" | grep -qF 'directory: ./tests/org-read-probe'; then
+if grep -qF 'directory: ./tests/org-read-probe' <<< "$reusable_probe_block"; then
   pass "the reusable-workflow probe points at the organization-read probe fixture"
 else
   fail "the reusable-workflow probe does not point at the organization-read probe fixture"
 fi
 
-if echo "$reusable_probe_block" | grep -qF 'enable-ssh-agent'; then
+if grep -qF 'enable-ssh-agent' <<< "$reusable_probe_block"; then
   fail "the reusable-workflow probe enables ssh-agent, so a pass would not prove the token path"
 else
   pass "the reusable-workflow probe supplies no SSH key"
@@ -1038,7 +1042,7 @@ fi
 
 # A job that calls a reusable workflow may not declare timeout-minutes, so this
 # probe cannot carry one. Asserted so the omission reads as deliberate.
-if echo "$reusable_probe_block" | grep -qE '^[[:space:]]*timeout-minutes:'; then
+if grep -qE '^[[:space:]]*timeout-minutes:' <<< "$reusable_probe_block"; then
   fail "the reusable-workflow probe declares timeout-minutes, which GitHub rejects on a uses: job"
 else
   pass "the reusable-workflow probe declares no timeout-minutes, which a uses: job may not have"
@@ -1081,7 +1085,7 @@ fi
 for probe_job in "${step_driven_probe_jobs[@]}"; do
   probe_block="$(extract_validate_job "$probe_job")"
 
-  if echo "$probe_block" | grep -qF 'timeout-minutes: 10'; then
+  if grep -qF 'timeout-minutes: 10' <<< "$probe_block"; then
     pass "$probe_job is bounded to ten minutes"
   else
     fail "$probe_job is not bounded to ten minutes"
@@ -1089,14 +1093,14 @@ for probe_job in "${step_driven_probe_jobs[@]}"; do
 
   # A warm Nix cache serves a tree an earlier authenticated run fetched and
   # turns the probe into a false green. This has happened in practice.
-  if echo "$probe_block" | grep -qF 'rm -rf "$HOME/.cache/nix/gitv3"'; then
+  if grep -qF 'rm -rf "$HOME/.cache/nix/gitv3"' <<< "$probe_block"; then
     pass "$probe_job clears the Nix git cache"
   else
     fail "$probe_job does not clear the Nix git cache, so it can report a false green"
   fi
 
-  probe_cold_cache_line="$(printf '%s\n' "$probe_block" | awk 'index($0, "rm -rf \"$HOME/.cache/nix/gitv3\"") { print NR; exit }')"
-  probe_first_fetch_line="$(printf '%s\n' "$probe_block" | awk 'index($0, "uses: ./") { print NR; exit }')"
+  probe_cold_cache_line="$(awk 'index($0, "rm -rf \"$HOME/.cache/nix/gitv3\"") { print NR; exit }' <<< "$probe_block")"
+  probe_first_fetch_line="$(awk 'index($0, "uses: ./") { print NR; exit }' <<< "$probe_block")"
   if [[ -n "$probe_cold_cache_line" && -n "$probe_first_fetch_line" && "$probe_cold_cache_line" -lt "$probe_first_fetch_line" ]]; then
     pass "$probe_job clears the cache before it authenticates or fetches anything"
   else
@@ -1108,13 +1112,13 @@ for probe_job in "${step_driven_probe_jobs[@]}"; do
   # network, and the A/B check's whole value is that it runs against a cache no
   # earlier authenticated run has warmed. The clear has to be the FIRST step of
   # the job, not merely an early one.
-  probe_first_step="$(printf '%s\n' "$probe_block" | awk '
+  probe_first_step="$(awk '
     /^      -[[:space:]]/ {
       sub(/^[[:space:]]*-[[:space:]]*/, "")
       print
       exit
     }
-  ')"
+  ' <<< "$probe_block")"
   if [ "$probe_first_step" = "name: Clear the Nix git and fetcher caches" ]; then
     pass "$probe_job clears the cache as its very first step"
   else
@@ -1123,45 +1127,45 @@ for probe_job in "${step_driven_probe_jobs[@]}"; do
 
   # A passing git+ssh fetch would prove nothing about the token path, so the
   # probe removes the SSH transport outright rather than merely not using it.
-  if echo "$probe_block" | grep -qF 'SSH_AUTH_SOCK: ""' &&
-    echo "$probe_block" | grep -qF 'GIT_SSH_COMMAND: "false"'; then
+  if grep -qF 'SSH_AUTH_SOCK: ""' <<< "$probe_block" &&
+    grep -qF 'GIT_SSH_COMMAND: "false"' <<< "$probe_block"; then
     pass "$probe_job makes the SSH transport unusable, so a pass can only be HTTPS"
   else
     fail "$probe_job leaves the SSH transport usable, so a pass would not prove the token path"
   fi
 
-  if echo "$probe_block" | grep -qF 'ssh-private-key' ||
-    echo "$probe_block" | grep -qF 'webfactory/ssh-agent'; then
+  if grep -qF 'ssh-private-key' <<< "$probe_block" ||
+    grep -qF 'webfactory/ssh-agent' <<< "$probe_block"; then
     fail "$probe_job supplies an SSH key"
   else
     pass "$probe_job supplies no SSH key"
   fi
 
-  if echo "$probe_block" | grep -qF 'enable-org-read-access: "true"'; then
+  if grep -qF 'enable-org-read-access: "true"' <<< "$probe_block"; then
     pass "$probe_job enables organization read access"
   else
     fail "$probe_job does not enable organization read access"
   fi
 
-  if echo "$probe_block" | grep -qF 'git clone --depth 1 "https://github.com/$PROBE_ORG/infra-base"'; then
+  if grep -qF 'git clone --depth 1 "https://github.com/$PROBE_ORG/infra-base"' <<< "$probe_block"; then
     pass "$probe_job clones private infra-base over HTTPS"
   else
     fail "$probe_job does not clone private infra-base over HTTPS"
   fi
 
-  if echo "$probe_block" | grep -qF '"git+ssh://git@github.com/$PROBE_ORG/nix-shared"'; then
+  if grep -qF '"git+ssh://git@github.com/$PROBE_ORG/nix-shared"' <<< "$probe_block"; then
     pass "$probe_job resolves private nix-shared through its git+ssh:// flake URL"
   else
     fail "$probe_job does not resolve private nix-shared through its git+ssh:// flake URL"
   fi
 
-  if echo "$probe_block" | grep -qF '/purescript-dedup"; ref = "main"; lfs = true;'; then
+  if grep -qF '/purescript-dedup"; ref = "main"; lfs = true;' <<< "$probe_block"; then
     pass "$probe_job fetches a private Git-LFS-bearing input"
   else
     fail "$probe_job does not fetch a private Git-LFS-bearing input"
   fi
 
-  if echo "$probe_block" | grep -qF 'git-lfs.github.com/spec/v1'; then
+  if grep -qF 'git-lfs.github.com/spec/v1' <<< "$probe_block"; then
     pass "$probe_job fails when an LFS object arrives as an unsmudged pointer"
   else
     fail "$probe_job does not check that LFS objects are smudged"
@@ -1170,7 +1174,7 @@ for probe_job in "${step_driven_probe_jobs[@]}"; do
   # The public-repository A/B separates the Nix endpoint defect from anything
   # to do with credentials, and its outcomes are inverted from the obvious
   # reading, so both have to stay spelled out where the step runs.
-  if echo "$probe_block" | grep -qF 'https://github.com/Apress/repo-with-large-file-storage'; then
+  if grep -qF 'https://github.com/Apress/repo-with-large-file-storage' <<< "$probe_block"; then
     pass "$probe_job runs the credential-free public-repository Git-LFS A/B check"
   else
     fail "$probe_job does not run the credential-free public-repository Git-LFS A/B check"
@@ -1184,13 +1188,13 @@ for probe_job in "${step_driven_probe_jobs[@]}"; do
   # earlier revisions of this repository poisoned with netrc-file = /tmp/netrc
   # on self-hosted runners. Nix then presented a stale token to a PUBLIC
   # repository and was answered 401 Bad credentials.
-  if printf '%s\n' "$probe_block" | awk '!/^[[:space:]]*#/' | grep -qF 'env -u NIX_USER_CONF_FILES'; then
+  if printf '%s\n' "$probe_block" | awk '!/^[[:space:]]*#/' | grep -F 'env -u NIX_USER_CONF_FILES' > /dev/null; then
     fail "$probe_job isolates the A/B check by UNSETTING NIX_USER_CONF_FILES, which restores Nix's default user-config list and reads the host's own nix.conf"
   else
     pass "$probe_job does not treat unsetting NIX_USER_CONF_FILES as isolation"
   fi
 
-  if echo "$probe_block" | grep -qF 'NIX_USER_CONF_FILES="$empty_nix_conf" nix eval'; then
+  if grep -qF 'NIX_USER_CONF_FILES="$empty_nix_conf" nix eval' <<< "$probe_block"; then
     pass "$probe_job points Nix at an EMPTY user configuration, replacing the default list rather than restoring it"
   else
     fail "$probe_job does not point Nix at an empty user configuration for the A/B check"
@@ -1199,20 +1203,20 @@ for probe_job in "${step_driven_probe_jobs[@]}"; do
   # A command-line --option outranks every configuration file, including the
   # SYSTEM one. Without it, /etc/nix/nix.conf's netrc-file still reaches this
   # check — which is exactly how dell-foo's stale system netrc broke it.
-  if echo "$probe_block" | grep -qF -e '--option netrc-file "$empty_netrc"'; then
+  if grep -qF -e '--option netrc-file "$empty_netrc"' <<< "$probe_block"; then
     pass "$probe_job overrides netrc-file on the command line, so no configuration file can supply a credential"
   else
     fail "$probe_job does not override netrc-file, so the system nix.conf can still hand it a credential"
   fi
 
-  if echo "$probe_block" | grep -qF -e '--option access-tokens ""'; then
+  if grep -qF -e '--option access-tokens ""' <<< "$probe_block"; then
     pass "$probe_job clears access-tokens for the A/B check"
   else
     fail "$probe_job leaves access-tokens in scope for a check that must carry no credential"
   fi
 
   for empty_isolation_file in ': > "$empty_nix_conf"' ': > "$empty_netrc"'; do
-    if echo "$probe_block" | grep -qF "$empty_isolation_file"; then
+    if grep -qF "$empty_isolation_file" <<< "$probe_block"; then
       pass "$probe_job creates the isolation file it points Nix at: $empty_isolation_file"
     else
       fail "$probe_job points Nix at an isolation file it never creates: $empty_isolation_file"
@@ -1220,7 +1224,7 @@ for probe_job in "${step_driven_probe_jobs[@]}"; do
   done
 
   for isolation_file_path in 'empty_nix_conf="$RUNNER_TEMP/credential-free-nix.conf"' 'empty_netrc="$RUNNER_TEMP/credential-free-netrc"'; do
-    if echo "$probe_block" | grep -qF "$isolation_file_path"; then
+    if grep -qF "$isolation_file_path" <<< "$probe_block"; then
       pass "$probe_job keeps its isolation file job-scoped under RUNNER_TEMP: $isolation_file_path"
     else
       fail "$probe_job does not keep its isolation file under RUNNER_TEMP: $isolation_file_path"
@@ -1231,19 +1235,19 @@ for probe_job in "${step_driven_probe_jobs[@]}"; do
   # 401 means host state defeated the isolation and no result in the run means
   # anything. It must never fall through to the generic no-phrase-matched red,
   # which reads as an endpoint-discovery problem.
-  if echo "$probe_block" | grep -qF '::error::401 Bad credentials from a check that carries no credential'; then
+  if grep -qF '::error::401 Bad credentials from a check that carries no credential' <<< "$probe_block"; then
     pass "$probe_job reports a 401 as defeated isolation rather than as an endpoint result"
   else
     fail "$probe_job does not distinguish a 401 caused by leaked host credentials from an endpoint-discovery failure"
   fi
 
-  if echo "$probe_block" | grep -qF 'HTTP 403 (LFS budget exceeded) is the expected SUCCESS signal'; then
+  if grep -qF 'HTTP 403 (LFS budget exceeded) is the expected SUCCESS signal' <<< "$probe_block"; then
     pass "$probe_job states that a 403 from the A/B check is the success signal"
   else
     fail "$probe_job does not state that a 403 from the A/B check is the success signal"
   fi
 
-  if echo "$probe_block" | grep -qF '::error::HTTP 422 from the public Git-LFS endpoint'; then
+  if grep -qF '::error::HTTP 422 from the public Git-LFS endpoint' <<< "$probe_block"; then
     pass "$probe_job treats a 422 from the A/B check as a hard failure"
   else
     fail "$probe_job does not treat a 422 from the A/B check as a hard failure"
@@ -1259,7 +1263,7 @@ for probe_job in "${step_driven_probe_jobs[@]}"; do
   # neither satisfy nor break the assertion about the code.
   probe_code="$(printf '%s\n' "$probe_block" | awk '!/^[[:space:]]*#/')"
   for non_portable_construct in 'grep -P' 'readlink -f' 'sed -i' 'stat -c' 'stat -f' 'mktemp -p' 'awk ' 'cmp '; do
-    if printf '%s\n' "$probe_code" | grep -qF -e "$non_portable_construct"; then
+    if grep -qF -e "$non_portable_construct" <<< "$probe_code"; then
       fail "$probe_job uses '$non_portable_construct', which is GNU-only or absent from a self-hosted runner service PATH"
     else
       pass "$probe_job avoids the non-portable construct '$non_portable_construct'"
@@ -1271,19 +1275,19 @@ done
 setup_probe_block="$(extract_validate_job probe-setup-action-org-read)"
 auth_probe_block="$(extract_validate_job probe-auth-action-self-hosted-org-read)"
 
-if echo "$setup_probe_block" | grep -qF 'uses: ./setup'; then
+if grep -qF 'uses: ./setup' <<< "$setup_probe_block"; then
   pass "the setup-action probe exercises the setup composite"
 else
   fail "the setup-action probe does not exercise the setup composite"
 fi
 
-if echo "$setup_probe_block" | grep -qF 'runs-on: ubuntu-latest'; then
+if grep -qF 'runs-on: ubuntu-latest' <<< "$setup_probe_block"; then
   pass "the setup-action probe runs on a GitHub-hosted Linux runner"
 else
   fail "the setup-action probe does not run on a GitHub-hosted Linux runner"
 fi
 
-if echo "$auth_probe_block" | grep -qF 'uses: ./auth'; then
+if grep -qF 'uses: ./auth' <<< "$auth_probe_block"; then
   pass "the self-hosted probe exercises the standalone auth action"
 else
   fail "the self-hosted probe does not exercise the standalone auth action"
@@ -1291,13 +1295,13 @@ fi
 
 # The DEV-757 build_workstation_index shape is the standalone action WITHOUT
 # the setup composite. A probe that reached for setup would not prove it.
-if echo "$auth_probe_block" | grep -qF 'uses: ./setup'; then
+if grep -qF 'uses: ./setup' <<< "$auth_probe_block"; then
   fail "the self-hosted probe uses the setup composite, so it does not prove the standalone path"
 else
   pass "the self-hosted probe never uses the setup composite"
 fi
 
-if echo "$auth_probe_block" | grep -qF 'runs-on: x86_64-linux'; then
+if grep -qF 'runs-on: x86_64-linux' <<< "$auth_probe_block"; then
   pass "the self-hosted probe runs on the x86_64-linux self-hosted runner"
 else
   fail "the self-hosted probe does not run on the x86_64-linux self-hosted runner"
@@ -1427,25 +1431,25 @@ fi
 # always() overrides only the implicit needs-succeeded condition, never an
 # explicit term, so the dispatch gate on the same line still excludes a pull
 # request while a FAILED probe's log is still scanned.
-if echo "$audit_block" | grep -qF "$audit_gate"; then
+if grep -qF "$audit_gate" <<< "$audit_block"; then
   pass "the audit carries always() plus the identical dispatch gate the probes carry"
 else
   fail "the audit does not carry always() plus the probes' dispatch gate"
 fi
 
-if echo "$audit_block" | grep -qF "github.event_name == 'workflow_dispatch'"; then
+if grep -qF "github.event_name == 'workflow_dispatch'" <<< "$audit_block"; then
   pass "the audit is gated on the workflow_dispatch event"
 else
   fail "the audit is not gated on the workflow_dispatch event, so a pull request could run it"
 fi
 
-if echo "$audit_block" | grep -qF 'inputs.run-org-read-probes'; then
+if grep -qF 'inputs.run-org-read-probes' <<< "$audit_block"; then
   pass "the audit is gated on the explicit run-org-read-probes opt-in"
 else
   fail "the audit is not gated on the run-org-read-probes opt-in, so a plain dispatch would run it"
 fi
 
-if echo "$audit_block" | grep -qF 'always()'; then
+if grep -qF 'always()' <<< "$audit_block"; then
   pass "the audit runs even when a probe failed, so a leak in a failed probe is still caught"
 else
   fail "the audit skips when a probe failed, so a leak in a failed probe would go unscanned"
@@ -1479,7 +1483,7 @@ done
 
 # The audit's own log is the one log that legitimately holds the scan patterns,
 # so auditing itself would be a guaranteed false-positive leak.
-if echo "$audit_block" | grep -qF "$audit_job"; then
+if grep -qF "$audit_job" <<< "$audit_block"; then
   fail "the audit names itself in its own body, so it can wait on or scan itself"
 else
   pass "the audit never waits on or scans its own log"
@@ -1555,19 +1559,19 @@ else
   fail "validate.yml declares $declared_probe_job_count probe jobs but this suite asserts on ${#probe_jobs[@]}"
 fi
 
-if echo "$audit_block" | grep -qF 'runs-on: ubuntu-latest'; then
+if grep -qF 'runs-on: ubuntu-latest' <<< "$audit_block"; then
   pass "the audit runs on a GitHub-hosted Linux runner"
 else
   fail "the audit does not run on a GitHub-hosted Linux runner"
 fi
 
-if echo "$audit_block" | grep -qF 'timeout-minutes: 10'; then
+if grep -qF 'timeout-minutes: 10' <<< "$audit_block"; then
   pass "the audit is bounded to ten minutes"
 else
   fail "the audit is not bounded to ten minutes"
 fi
 
-if echo "$audit_block" | grep -qF 'actions: read'; then
+if grep -qF 'actions: read' <<< "$audit_block"; then
   pass "the audit holds the actions: read permission it needs to read job logs"
 else
   fail "the audit cannot read job logs without the actions: read permission"
@@ -1575,20 +1579,20 @@ fi
 
 # It reads logs and nothing else: no token is minted for it, and it fetches
 # nothing, so it holds no credential that could enter the log it writes.
-if echo "$audit_block" | grep -qF 'id-token: write'; then
+if grep -qF 'id-token: write' <<< "$audit_block"; then
   fail "the audit requests id-token: write, which it has no use for"
 else
   pass "the audit requests no id-token: write"
 fi
 
-if echo "$audit_block" | grep -qF 'CI_FETCH_APP'; then
+if grep -qF 'CI_FETCH_APP' <<< "$audit_block"; then
   fail "the audit is handed App credentials it has no use for"
 else
   pass "the audit is handed no App credentials"
 fi
 
 for audit_surface in 'uses: ./setup' 'uses: ./auth' 'uses: ./.github/workflows/workflow.yml'; do
-  if echo "$audit_block" | grep -qF "$audit_surface"; then
+  if grep -qF "$audit_surface" <<< "$audit_block"; then
     fail "the audit invokes $audit_surface, so it authenticates rather than only auditing"
   else
     pass "the audit does not invoke $audit_surface"
@@ -1606,8 +1610,8 @@ audit_incomplete_conditions=(
   "could not be read after 3 attempts"
 )
 for audit_incomplete_condition in "${audit_incomplete_conditions[@]}"; do
-  if echo "$audit_block" | grep -qF "::error::AUDIT INCOMPLETE, NOT A LEAK: " &&
-    echo "$audit_block" | grep -qF "$audit_incomplete_condition"; then
+  if grep -qF "::error::AUDIT INCOMPLETE, NOT A LEAK: " <<< "$audit_block" &&
+    grep -qF "$audit_incomplete_condition" <<< "$audit_block"; then
     pass "the audit fails closed when it cannot scan: $audit_incomplete_condition"
   else
     fail "the audit does not fail closed when it cannot scan: $audit_incomplete_condition"
@@ -1624,7 +1628,7 @@ else
   fail "$audit_incomplete_branches branches report an unscannable condition, expected ${#audit_incomplete_conditions[@]}"
 fi
 
-if echo "$audit_block" | grep -qF '::error::CREDENTIAL LEAK: '; then
+if grep -qF '::error::CREDENTIAL LEAK: ' <<< "$audit_block"; then
   pass "a credential found in a fully-read log is reported as a leak"
 else
   fail "the audit reports no distinct credential-leak failure"
@@ -1632,7 +1636,7 @@ fi
 
 # The two reds must never read alike: one means nothing was ruled out, the other
 # means something was found.
-if echo "$audit_block" | grep -qF 'was read in full and contains'; then
+if grep -qF 'was read in full and contains' <<< "$audit_block"; then
   pass "the leak wording states the log was read in full, distinguishing it from the cannot-read failure"
 else
   fail "the leak wording does not distinguish itself from the cannot-read failure"
@@ -1640,7 +1644,7 @@ fi
 
 # A success exit anywhere inside the audit would let a branch that skipped the
 # scan report green.
-if echo "$audit_block" | grep -qE 'exit 0'; then
+if grep -qE 'exit 0' <<< "$audit_block"; then
   fail "the audit contains an 'exit 0', so some branch can report success without scanning"
 else
   pass "the audit contains no early success exit"
@@ -1658,14 +1662,14 @@ else
   fail "the audit runs $audit_non_quiet_greps non-quiet greps, which could print a credential"
 fi
 
-if echo "$audit_block" | grep -qF "grep -q 'PRIVATE KEY'" &&
-  echo "$audit_block" | grep -qF 'gh[psu]_'; then
+if grep -qF "grep -q 'PRIVATE KEY'" <<< "$audit_block" &&
+  grep -qF 'gh[psu]_' <<< "$audit_block"; then
   pass "the audit scans for both installation-token and private-key material"
 else
   fail "the audit does not scan for both installation-token and private-key material"
 fi
 
-if echo "$audit_block" | grep -qF '|| true'; then
+if grep -qF '|| true' <<< "$audit_block"; then
   fail "the audit uses '|| true' (fail-fast violation)"
 else
   pass "the audit contains no '|| true'"
@@ -1714,13 +1718,13 @@ done
 
 for probe_job in "${probe_jobs[@]}"; do
   probe_block="$(extract_validate_job "$probe_job")"
-  if echo "$probe_block" | grep -qF 'actions/jobs/'; then
+  if grep -qF 'actions/jobs/' <<< "$probe_block"; then
     fail "$probe_job reads a job log from inside itself, which 404s while the job runs"
   else
     pass "$probe_job reads no job log from inside itself"
   fi
 
-  if echo "$probe_block" | grep -qF 'actions: read'; then
+  if grep -qF 'actions: read' <<< "$probe_block"; then
     fail "$probe_job still requests actions: read, which only a log reader needs"
   else
     pass "$probe_job requests no actions: read permission"
@@ -1802,14 +1806,14 @@ smoke_leftover_checks=(
   '"$HOME/.git-credentials still carries an x-access-token credential"'
 )
 for smoke_leftover_check in "${smoke_leftover_checks[@]}"; do
-  if echo "$smoke_block" | grep -qF -e "$smoke_leftover_check"; then
+  if grep -qF -e "$smoke_leftover_check" <<< "$smoke_block"; then
     pass "the setup composite smoke job proves this leftover is gone on a real runner: $smoke_leftover_check"
   else
     fail "the setup composite smoke job does not prove this leftover is gone: $smoke_leftover_check"
   fi
 done
 
-if echo "$smoke_block" | grep -qF "grep -qE '^[[:space:]]*(extra-)?access-tokens|^[[:space:]]*netrc-file'"; then
+if grep -qF "grep -qE '^[[:space:]]*(extra-)?access-tokens|^[[:space:]]*netrc-file'" <<< "$smoke_block"; then
   pass "the setup composite smoke job proves the user nix.conf carries no job credential settings"
 else
   fail "the setup composite smoke job does not check the user nix.conf for job credential settings"

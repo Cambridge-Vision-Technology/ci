@@ -60,11 +60,17 @@ let
           "node-path"
           "node-streams"
         ]
-        ++ pkgs.lib.optionals (builtins.elem "tools/CI/Docs/Test.purs" files) [
-          "refs"
-          "now"
-          "datetime"
-        ]
+        ++
+          pkgs.lib.optionals
+            (
+              builtins.elem "tools/CI/Docs/Test.purs" files
+              || builtins.elem "tools/CI/Workflow/PlumbingCheck.purs" files
+            )
+            [
+              "refs"
+              "now"
+              "datetime"
+            ]
         ++ pkgs.lib.optionals (builtins.elem "tools/CI/Docs/TransportFixture.purs" files) [
           "refs"
           "node-event-emitter"
@@ -88,6 +94,9 @@ let
     "tools/Platform/Node/Build.purs"
     "tools/Platform/Node/Build.js"
   ];
+  workflowPrimitiveFiles = platformFiles;
+  workflowCompiler = compile inventory.workflowPlumbing workflowPrimitiveFiles;
+  workflowTests = workflowCompiler.script { module = "CI.Workflow.PlumbingCheck"; };
   fixtureCompiler = compile inventory.fixture fixtureFiles;
   fixture = fixtureCompiler.script { module = "CI.Docs.Fixture"; };
   transportFixtureCompiler = compile inventory.transportFixture platformFiles;
@@ -155,6 +164,7 @@ let
     ++ inventory.fixture
     ++ inventory.tests
     ++ inventory.transportFixture
+    ++ inventory.workflowPlumbing
     ++ [ "whine.yaml" ]
   );
   inventoryCheck =
@@ -279,6 +289,22 @@ let
   );
 in
 {
+  workflowPlumbing =
+    workflowSource:
+    pkgs.runCommand "workflow-plumbing-large-input"
+      {
+        nativeBuildInputs = [
+          pkgs.bash
+          pkgs.coreutils
+          pkgs.gnugrep
+          pkgs.gnused
+          pkgs.gawk
+        ];
+      }
+      ''
+        set -euo pipefail
+        exec ${pkgs.coreutils}/bin/timeout --kill-after=2s 60s ${workflowTests} ${workflowSource} "$out"
+      '';
   packages.docs-tool = tool;
   packages.docs-fixture = fixtureSuccess;
   apps.docs-tool = {
@@ -296,7 +322,13 @@ in
       docs-format = pkgs.runCommand "docs-format" { } ''
         set -euo pipefail
         exec ${pkgs.nodePackages.purs-tidy}/bin/purs-tidy check ${
-          source (inventory.docs ++ inventory.fixture ++ inventory.tests ++ inventory.transportFixture)
+          source (
+            inventory.docs
+            ++ inventory.fixture
+            ++ inventory.tests
+            ++ inventory.transportFixture
+            ++ inventory.workflowPlumbing
+          )
         }/tools > "$out"
       '';
       docs-workflow = workflowCheck "docs-workflow" "${workflowSource}/.github/workflows/workflow.yml";
@@ -306,6 +338,10 @@ in
       docs-source-inventory =
         inventoryCheck "ci-docs" compiler inventory.docs platformFiles
           "CI.Docs.Main";
+      workflow-plumbing-source-inventory =
+        inventoryCheck "workflow-plumbing" workflowCompiler inventory.workflowPlumbing
+          workflowPrimitiveFiles
+          "CI.Workflow.PlumbingCheck";
       docs-test-source-inventory =
         inventoryCheck "ci-docs-test" testCompiler testFiles platformFiles
           "CI.Docs.Test";
