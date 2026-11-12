@@ -89,6 +89,7 @@ jobs:
       enable-org-read-access: true
       enable-failure-diagnostics: true
       fail-fast: false
+      single-build-job: true
       runner-map: '{"x86_64-linux": "ubuntu-latest", "aarch64-darwin": "macos-latest"}'
     secrets:
       github-app-id: ${{ secrets.CI_FETCH_APP_ID }}
