@@ -255,6 +255,7 @@
                 set -euo pipefail
                 exec bash ${workflowStructureSource}/tests/workflow-structure/test.sh > "$out"
               '';
+          workflow-plumbing-large-input = (documentation pkgs).workflowPlumbing workflowStructureSource;
           single-build-job-contract =
             pkgs.runCommand "single-build-job-contract"
               {
