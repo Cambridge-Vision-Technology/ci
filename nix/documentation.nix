@@ -209,6 +209,9 @@ let
     "evaluation"
   ];
   publicationCases = [
+    "numeric-id"
+    "invalid-id"
+    "id-protocol"
     "bootstrap"
     "auth-handoff"
     "bootstrap-unavailable"
