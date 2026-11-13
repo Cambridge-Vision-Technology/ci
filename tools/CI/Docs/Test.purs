@@ -3,11 +3,13 @@ module CI.Docs.Test (main) where
 import Prelude hiding (identity)
 
 import Build.Output as Build.Output
+import CI.Docs.Access as CI.Docs.Access
 import CI.Docs.Artifact as CI.Docs.Artifact
 import CI.Docs.Json as CI.Docs.Json
 import CI.Docs.Publication as CI.Docs.Publication
 import Data.Array as Data.Array
 import Data.Either as Data.Either
+import Data.Foldable as Data.Foldable
 import Data.DateTime.Instant as Data.DateTime.Instant
 import Data.Time.Duration as Data.Time.Duration
 import Data.Maybe as Data.Maybe
@@ -131,6 +133,8 @@ publication root mode = do
   successful <- Effect.Ref.new 0
   waits <- Effect.Ref.new 0
   observations <- Effect.Ref.new []
+  probes <- Effect.Ref.new 0
+  siteReads <- Effect.Ref.new 0
   states <- Effect.Ref.new
     ( case mode of
         "progress" -> [ "deployment_in_progress", "syncing_files", "finished_file_sync", "updating_pages", "purging_cdn", "succeed" ]
@@ -142,11 +146,17 @@ publication root mode = do
         _ -> [ "succeed" ]
     )
   let
+    bootstrap = Data.Array.elem mode [ "bootstrap", "bootstrap-unavailable", "bootstrap-public-access", "bootstrap-host-mismatch" ]
+    expectedTarget = if bootstrap then "https://test.pages.github.io/" else "https://test.example/"
+    siteUrl = if bootstrap then "http://test.pages.github.io/" else expectedTarget
     get path
       | path == "repos/TEST/docs" = pure "{\"default_branch\":\"main\"}"
       | path == "repos/TEST/docs/pages" =
           if mode == "missing-site" then Effect.Exception.throw "Injected HTTP 404 from Pages"
-          else pure ("{\"public\":" <> (if mode == "public-site" then "true" else "false") <> ",\"build_type\":\"workflow\",\"html_url\":\"https://test.example/\"}")
+          else do
+            reads <- Effect.Ref.read siteReads
+            Effect.Ref.modify_ (_ + 1) siteReads
+            pure ("{\"public\":" <> (if mode == "public-site" || (mode == "site-changed" && reads > 0) then "true" else "false") <> ",\"build_type\":\"workflow\",\"html_url\":\"" <> (if mode == "site-url-changed" && reads > 0 then "https://other.example/" else siteUrl) <> "\"}")
       | path == "repos/TEST/docs/pages/deployments/returned-id" = do
           remaining <- Effect.Ref.read states
           case Data.Array.uncons remaining of
@@ -157,9 +167,13 @@ publication root mode = do
               Effect.Exception.throw "Unexpected status read"
       | otherwise = Effect.Exception.throw ("Unexpected TEST request: " <> path)
     probe url = do
-      CI.Docs.Artifact.ensure (url == "https://test.example/") "Wrong TEST access probe target"
-      if mode == "unavailable" then Effect.Exception.throw "Unavailable private access"
-      else pure (if mode == "public-access" then "HTTP/2 200\r\n" else if mode == "spoof-access" then "HTTP/2 302\r\nlocation: https://github.com/login.evil\r\n" else "HTTP/2 302\r\nlocation: https://github.com/login?return_to=TEST\r\n")
+      CI.Docs.Artifact.ensure (url == expectedTarget) "Wrong TEST access probe target; HTTP or a different site must never be probed"
+      count <- Effect.Ref.read probes
+      Effect.Ref.modify_ (_ + 1) probes
+      if mode == "unavailable" || mode == "bootstrap-unavailable" then Effect.Exception.throw "Unavailable private access"
+      else if mode == "bootstrap" || mode == "auth-handoff" then
+        Node.Process.lookupEnv "DOCS_TEST_PRIVATE_RESPONSE" >>= Data.Maybe.maybe (Effect.Exception.throw "Missing captured private response") Platform.Node.Build.readImpl
+      else pure (if Data.Array.elem mode [ "public-access", "bootstrap-public-access" ] || (mode == "post-public-access" && count > 0) then "HTTP/2 200\r\n" else if mode == "spoof-access" then "HTTP/2 302\r\nlocation: https://github.com/login.evil\r\n" else "HTTP/2 302\r\nlocation: https://github.com/login?return_to=TEST\r\n")
     client =
       { get
       , probe
@@ -167,16 +181,35 @@ publication root mode = do
           CI.Docs.Artifact.ensure (actual == identity && artifactId == 9876543210.0) "Wrong Pages creation request identity/artifact"
           Effect.Ref.modify_ (_ + 1) calls
           if mode == "creation-failure" then Effect.Exception.throw "Injected Pages creation failure"
-          else pure { status_url: "https://api.github.com/repos/TEST/docs/pages/deployments/returned-id", page_url: if mode == "verification-failure" then "https://wrong.example/" else "https://test.example/" }
+          else pure { status_url: "https://api.github.com/repos/TEST/docs/pages/deployments/returned-id", page_url: if mode == "verification-failure" then "https://wrong.example/" else if mode == "bootstrap-host-mismatch" then "http://other.pages.github.io/" else siteUrl }
       , record: \deployment _ -> do
           CI.Docs.Artifact.ensure (deployment == "returned-id") "Assumed deployment identity rather than returned identity"
           Effect.Ref.modify_ (_ + 1) recorded
+          when (mode == "recording-failure") (Effect.Exception.throw "Injected evidence recording failure")
       , wait: Effect.Ref.modify_ (_ + 1) waits
       , observed: \status -> Effect.Ref.modify_ (_ <> [ status ]) observations
       , verified: Effect.Ref.modify_ (_ + 1) successful
       }
     accepted = CI.Docs.Publication.publishWith client "push" "refs/heads/main" root "9876543210" identity
   case mode of
+    "bootstrap" ->
+      accepted
+    "auth-handoff" ->
+      accepted
+    "bootstrap-unavailable" ->
+      reject "Unavailable private access" accepted
+    "bootstrap-public-access" ->
+      reject "Private access verification unavailable" accepted
+    "post-public-access" ->
+      reject "Private access verification unavailable" accepted
+    "site-changed" ->
+      reject "Private Pages setup blocker" accepted
+    "site-url-changed" ->
+      reject "differs from associated" accepted
+    "recording-failure" ->
+      reject "Injected evidence recording failure" accepted
+    "bootstrap-host-mismatch" ->
+      reject "differs from associated" accepted
     "mechanism" ->
       accepted
     "progress" ->
@@ -194,6 +227,42 @@ publication root mode = do
       CI.Docs.Artifact.ensure (CI.Docs.Publication.accessDenied "HTTP/1.1 200 Connection established\r\n\r\nHTTP/2 302\r\nlocation: https://github.com/login?return_to=TEST\r\n\r\n") "Proxy prelude hid the final authentication redirect"
       CI.Docs.Artifact.ensure (not (CI.Docs.Publication.accessDenied "HTTP/2 302\r\nlocation: https://github.com/login?return_to=TEST\r\n\r\nHTTP/2 200\r\n\r\n")) "An earlier redirect concealed a final public response"
       CI.Docs.Artifact.ensure (not (CI.Docs.Publication.accessDenied "HTTP/2 302\r\nlocation: https://github.com/login.evil\r\n\r\n")) "Lookalike authentication path was accepted"
+      captured <- Node.Process.lookupEnv "DOCS_TEST_PRIVATE_RESPONSE" >>= Data.Maybe.maybe (Effect.Exception.throw "Missing captured private response") Platform.Node.Build.readImpl
+      CI.Docs.Artifact.ensure (CI.Docs.Publication.accessDenied captured) "Captured private Pages authentication handoff was not recognized"
+      Data.Foldable.for_
+        [ Data.String.replaceAll (Data.String.Pattern "HTTP/2 302") (Data.String.Replacement "HTTP/2 200") captured
+        , Data.String.replaceAll (Data.String.Pattern "https://github.com/") (Data.String.Replacement "https://github.com.evil/") captured
+        , Data.String.replaceAll (Data.String.Pattern "/pages/auth?") (Data.String.Replacement "/pages/auth/evil?") captured
+        , Data.String.replaceAll (Data.String.Pattern "x-pages-private: 1\n") (Data.String.Replacement "") captured
+        , Data.String.replaceAll (Data.String.Pattern "x-pages-private: 1") (Data.String.Replacement "x-pages-private: 0") captured
+        , Data.String.replaceAll (Data.String.Pattern "x-pages-private: 1") (Data.String.Replacement "x-pages-private: 1\nx-pages-private: 1") captured
+        , captured <> "location: https://github.com/login?return_to=TEST\n"
+        ]
+        (\response -> CI.Docs.Artifact.ensure (not (CI.Docs.Publication.accessDenied response)) "Synthetic public/spoofed/ambiguous private-auth response was accepted")
+    "url-protocol" -> do
+      Data.Foldable.for_
+        [ "http://test.pages.github.io/", "https://test.pages.github.io/", "https://TEST.pages.github.io" ]
+        ( \input -> do
+            target <- Data.Either.either Effect.Exception.throw pure (CI.Docs.Access.fromPagesUrl input)
+            CI.Docs.Artifact.ensure (CI.Docs.Access.url target == "https://test.pages.github.io/") "Unexpected HTTPS target normalization"
+        )
+      Data.Foldable.for_
+        [ "http://test.example/"
+        , "http://pages.github.io/"
+        , "http://test.pages.github.io.evil/"
+        , "http://test.pages.github.io@evil.example/"
+        , "https://user:password@test.pages.github.io/"
+        , "https://test.pages.github.io:80/"
+        , "https://test.pages.github.io\\@evil.example/"
+        , "https://test.pages.github.io/?override=evil"
+        , "https://test.pages.github.io/#fragment"
+        , "https://test.pages.github.io/\n"
+        , "https:///"
+        , "https://.pages.github.io/"
+        , "//test.pages.github.io/"
+        , "ftp://test.pages.github.io/"
+        ]
+        (\input -> CI.Docs.Artifact.ensure (Data.Either.isLeft (CI.Docs.Access.fromPagesUrl input)) "Unsafe or unrelated Pages metadata URL was accepted")
     "pr" ->
       reject "only a default-branch" (CI.Docs.Publication.publishWith client "pull_request" "refs/pull/1/merge" root "9876543210" identity)
     "repository" ->
@@ -231,7 +300,7 @@ publication root mode = do
   pauses <- Effect.Ref.read waits
   seen <- Effect.Ref.read observations
   let
-    creationExpected = Data.Array.elem mode [ "mechanism", "progress", "retry-progress", "progress-failure", "unknown-status", "retry-exhausted", "creation-failure", "unavailable", "public-access", "spoof-access", "deployment-failure", "verification-failure" ]
+    creationExpected = Data.Array.elem mode [ "bootstrap", "auth-handoff", "post-public-access", "site-changed", "site-url-changed", "recording-failure", "bootstrap-host-mismatch", "mechanism", "progress", "retry-progress", "progress-failure", "unknown-status", "retry-exhausted", "creation-failure", "deployment-failure", "verification-failure" ]
     expectedWaits = case mode of
       "progress" -> 5
       "retry-progress" -> 2
@@ -240,7 +309,10 @@ publication root mode = do
       _ -> 0
   CI.Docs.Artifact.ensure (requests == (if creationExpected then 1 else 0)) "Rejected publication unexpectedly created a deployment or skipped its expected creation"
   CI.Docs.Artifact.ensure (records == (if creationExpected && mode /= "creation-failure" then 1 else 0)) "Wrong deployment evidence multiplicity"
-  CI.Docs.Artifact.ensure (successes == (if Data.Array.elem mode [ "mechanism", "progress", "retry-progress" ] then 1 else 0)) "Wrong verified-deployment claim for the modeled state"
+  CI.Docs.Artifact.ensure (successes == (if Data.Array.elem mode [ "bootstrap", "auth-handoff", "mechanism", "progress", "retry-progress" ] then 1 else 0)) "Wrong verified-deployment claim for the modeled state"
+  probeCount <- Effect.Ref.read probes
+  when (Data.Array.elem mode [ "bootstrap", "auth-handoff", "post-public-access", "mechanism", "progress", "retry-progress" ]) (CI.Docs.Artifact.ensure (probeCount == 2) "HTTPS access must be verified before creation and after completion")
+  when (Data.Array.elem mode [ "bootstrap-unavailable", "bootstrap-public-access", "public-access", "unavailable", "spoof-access", "site-changed", "site-url-changed", "bootstrap-host-mismatch", "verification-failure" ]) (CI.Docs.Artifact.ensure (probeCount == 1) "Unsafe access or changed site did not stop at its expected boundary")
   CI.Docs.Artifact.ensure (pauses == expectedWaits) "Wrong polling multiplicity"
   when (mode == "progress") (CI.Docs.Artifact.ensure (seen == [ "deployment_in_progress", "syncing_files", "finished_file_sync", "updating_pages", "purging_cdn", "succeed", "succeed" ]) "Incomplete documented progress lifecycle")
   when (mode == "retry-progress") (CI.Docs.Artifact.ensure (seen == [ "deployment_attempt_error", "syncing_files", "succeed", "succeed" ]) "Retryable status did not recover without recreating")
@@ -263,6 +335,11 @@ transport root = do
   Node.Process.setEnv "DOCS_PRODUCER_ARTIFACT_ID" "12345"
   Platform.Node.Build.writeImpl (root <> "/binding.json") ""
   Platform.Node.Build.writeImpl (root <> "/output") ""
+  response <- CI.Docs.Publication.probeAccess "https://test.pages.github.io/"
+  CI.Docs.Artifact.ensure (CI.Docs.Publication.accessDenied response) "Production TLS probe did not preserve captured private authentication response"
+  Node.Process.setEnv "DOCS_TRANSPORT_FAILURE" "probe"
+  reject "Command failed" (void (CI.Docs.Publication.probeAccess "https://test.pages.github.io/"))
+  Node.Process.setEnv "DOCS_TRANSPORT_FAILURE" ""
   creation <- Effect.Exception.try (CI.Docs.Publication.create (identityFor "synthetic-system") 9876543210.0)
   created <- case creation of
     Data.Either.Left error -> do
@@ -285,6 +362,13 @@ transport root = do
   CI.Docs.Artifact.ensure (final.status == "succeed" && final.lastStatus == "succeed" && final.privateAccess == "denied") "Verified adapter did not update retained evidence"
   output <- Platform.Node.Build.readImpl (root <> "/output")
   CI.Docs.Artifact.ensure (output == "deployment_id=returned-id\npage_url=https://test.example/\n" && not (Data.String.contains (Data.String.Pattern "CREDENTIAL") (output <> finalText))) "Unsafe or incorrect production evidence/output adapter"
+  Platform.Node.Build.writeImpl (root <> "/output") ""
+  CI.Docs.Publication.record root "9876543210" "returned-id" "http://test.pages.github.io/"
+  bootstrapEvidence <- Platform.Node.Build.readImpl (root <> "/private-pages-deployment.json") >>= CI.Docs.Artifact.parse :: Effect.Effect CI.Docs.Json.DeploymentEvidence
+  bootstrapOutput <- Platform.Node.Build.readImpl (root <> "/output")
+  CI.Docs.Artifact.ensure (bootstrapEvidence.url == "http://test.pages.github.io/" && bootstrapOutput == "deployment_id=returned-id\npage_url=https://test.pages.github.io/\n") "Raw returned URL was lost or the environment link was not HTTPS"
+  probeCalls <- Platform.Node.Build.readImpl (root <> "/probe.calls")
+  CI.Docs.Artifact.ensure (probeCalls == "call\ncall\n") "Production HTTPS probe multiplicity changed"
   Node.Process.setEnv "DOCS_TRANSPORT_FAILURE" "oidc"
   reject "Pages OIDC response invalid" (void (CI.Docs.Publication.create (identityFor "synthetic-system") 9876543210.0))
   postsBeforeFailure <- Platform.Node.Build.readImpl (root <> "/post.calls")

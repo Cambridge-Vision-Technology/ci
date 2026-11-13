@@ -3,6 +3,7 @@ module CI.Docs.Publication where
 import Prelude
 
 import Build.Output as Build.Output
+import CI.Docs.Access as CI.Docs.Access
 import CI.Docs.Artifact as CI.Docs.Artifact
 import CI.Docs.Json as CI.Docs.Json
 import Data.Argonaut.Core as Data.Argonaut.Core
@@ -33,27 +34,28 @@ getApi path = CI.Docs.Artifact.text "gh" [ "api", "--method", "GET", "-H", "Acce
 required :: String -> Effect.Effect String
 required name = Node.Process.lookupEnv name >>= Data.Maybe.maybe (Effect.Exception.throw ("Missing " <> name)) pure
 
-privateSiteWith :: (String -> Effect.Effect String) -> CI.Docs.Json.Binding -> Effect.Effect Site
+privateSiteWith :: (String -> Effect.Effect String) -> CI.Docs.Json.Binding -> Effect.Effect CI.Docs.Access.HttpsTarget
 privateSiteWith get identity = do
   observed <- Effect.Exception.try (get ("repos/" <> identity.repository <> "/pages") >>= CI.Docs.Artifact.parse :: Effect.Effect Site)
   site <- Data.Either.either (\_ -> Effect.Exception.throw "Private Pages setup blocker: cannot read or validate the associated site; check private hosting capability and repository-scoped Pages authority") pure observed
   CI.Docs.Artifact.ensure (not site.public && site.build_type == "workflow") "Private Pages setup blocker: require an existing workflow-built private site; never fall back to public Pages"
-  CI.Docs.Artifact.ensure (Data.Maybe.isJust (Data.String.stripPrefix (Data.String.Pattern "https://") site.html_url)) "Private Pages setup blocker: HTTPS site URL unavailable"
-  pure site
+  Data.Either.either Effect.Exception.throw pure (CI.Docs.Access.fromPagesUrl site.html_url)
 
 preflight :: String -> CI.Docs.Json.Binding -> Effect.Effect Unit
 preflight bundle identity = do
   event <- required "GITHUB_EVENT_NAME"
   ref <- required "GITHUB_REF"
-  preflightWith getApi event ref bundle identity
+  void (preflightWith getApi probeAccess event ref bundle identity)
 
-preflightWith :: (String -> Effect.Effect String) -> String -> String -> String -> CI.Docs.Json.Binding -> Effect.Effect Unit
-preflightWith get event ref bundle identity = do
+preflightWith :: (String -> Effect.Effect String) -> (String -> Effect.Effect String) -> String -> String -> String -> CI.Docs.Json.Binding -> Effect.Effect CI.Docs.Access.HttpsTarget
+preflightWith get probe event ref bundle identity = do
   CI.Docs.Artifact.ensure (event == "push") "Documentation publication refused: only a default-branch push may deploy"
   CI.Docs.Artifact.verify bundle identity
   repository <- get ("repos/" <> identity.repository) >>= CI.Docs.Artifact.parse :: Effect.Effect Repository
   CI.Docs.Artifact.ensure (event == "push" && ref == "refs/heads/" <> repository.default_branch) "Documentation publication refused: only a default-branch push may deploy"
-  void (privateSiteWith get identity)
+  target <- privateSiteWith get identity
+  verifyAccess probe target
+  pure target
 
 deployed :: CI.Docs.Json.Binding -> String -> String -> Effect.Effect Unit
 deployed identity deployment url = do
@@ -72,8 +74,13 @@ deployedWith get probe observe identity deployment url = do
   observe status.status
   CI.Docs.Artifact.ensure (status.status == "succeed") "Pages deployment verification failed"
   site <- privateSiteWith get identity
-  CI.Docs.Artifact.ensure (url == site.html_url) "Pages deployment URL differs from associated private site"
-  response <- probe url
+  target <- Data.Either.either Effect.Exception.throw pure (CI.Docs.Access.fromPagesUrl url)
+  CI.Docs.Artifact.ensure (target == site) "Pages deployment URL differs from associated private site"
+  verifyAccess probe target
+
+verifyAccess :: (String -> Effect.Effect String) -> CI.Docs.Access.HttpsTarget -> Effect.Effect Unit
+verifyAccess probe target = do
+  response <- probe (CI.Docs.Access.url target)
   CI.Docs.Artifact.ensure (accessDenied response) "Private access verification unavailable: expected recognizable GitHub authentication redirect, not public content or a network error"
 
 accessDenied :: String -> Boolean
@@ -85,6 +92,8 @@ accessDenied response =
       [ version, code ] -> Data.Maybe.Just { version, code }
       _ -> Data.Maybe.Nothing
     redirects = Data.Array.mapMaybe (Data.String.stripPrefix (Data.String.Pattern "location:") <<< Data.String.toLower) lines
+    privateMarkers = Data.Array.mapMaybe (Data.String.stripPrefix (Data.String.Pattern "x-pages-private:") <<< Data.String.toLower) lines
+    privatePages = map Data.String.trim privateMarkers == [ "1" ]
     authentication = Data.Array.any
       ( \location ->
           let
@@ -92,12 +101,13 @@ accessDenied response =
           in
             target == "https://github.com/login"
               || Data.Maybe.isJust (Data.String.stripPrefix (Data.String.Pattern "https://github.com/login?") target)
+              || (privatePages && Data.Maybe.isJust (Data.String.stripPrefix (Data.String.Pattern "https://github.com/pages/auth?") target))
               || ((Data.Maybe.isJust (Data.String.stripSuffix (Data.String.Pattern "/sso") target) || Data.String.contains (Data.String.Pattern "/sso?") target) && Data.Array.any (\prefix -> Data.Maybe.isJust (Data.String.stripPrefix (Data.String.Pattern prefix) target)) [ "https://github.com/orgs/", "https://github.com/enterprises/" ])
       )
       redirects
     redirected = Data.Maybe.maybe false (\value -> Data.Array.elem value.version [ "HTTP/1.0", "HTTP/1.1", "HTTP/2", "HTTP/2.0", "HTTP/3", "HTTP/3.0" ] && Data.Array.elem value.code [ "302", "303", "307" ]) status
   in
-    redirected && authentication
+    redirected && Data.Array.length redirects == 1 && authentication
 
 publish :: String -> String -> CI.Docs.Json.Binding -> Effect.Effect Unit
 publish bundle artifact identity = do
@@ -117,7 +127,7 @@ type Client =
 
 publishWith :: Client -> String -> String -> String -> String -> CI.Docs.Json.Binding -> Effect.Effect Unit
 publishWith client event ref bundle artifact identity = do
-  preflightWith client.get event ref bundle identity
+  expectedTarget <- preflightWith client.get client.probe event ref bundle identity
   CI.Docs.Artifact.ensure (artifact /= "" && Data.Array.all (\c -> c >= '0' && c <= '9') (Data.String.CodeUnits.toCharArray artifact)) "Invalid Pages artifact ID"
   artifactId <- Data.Maybe.maybe (Effect.Exception.throw "Invalid Pages artifact ID") pure (Data.Number.fromString artifact)
   CI.Docs.Artifact.ensure (artifactId > 0.0 && artifactId <= 9007199254740991.0) "Pages artifact ID is outside exact numeric range"
@@ -125,7 +135,10 @@ publishWith client event ref bundle artifact identity = do
   deployment <- Data.Maybe.maybe (Effect.Exception.throw "Pages returned an unexpected deployment status URL") pure
     (Data.String.stripPrefix (Data.String.Pattern ("https://api.github.com/repos/" <> identity.repository <> "/pages/deployments/")) created.status_url)
   CI.Docs.Artifact.ensure (deployment /= "" && Data.Array.all (\c -> (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-') (Data.String.CodeUnits.toCharArray deployment)) "Invalid returned Pages deployment ID"
+  Build.Output.writeLine Node.Process.stderr ("Pages deployment created: " <> deployment) (pure unit)
   client.record deployment created.page_url
+  actualTarget <- Data.Either.either Effect.Exception.throw pure (CI.Docs.Access.fromPagesUrl created.page_url)
+  CI.Docs.Artifact.ensure (actualTarget == expectedTarget) "Pages deployment URL differs from associated private site"
   poll 100 deployment
   deployedWith client.get client.probe client.observed identity deployment created.page_url
   client.verified
@@ -168,6 +181,7 @@ record bundle pagesArtifact deployment url = do
   outputPath <- required "GITHUB_OUTPUT"
   old <- Platform.Node.Build.readImpl outputPath
   CI.Docs.Artifact.ensure (Data.String.contains (Data.String.Pattern "\n") url == false && Data.String.contains (Data.String.Pattern "\r") url == false) "Invalid Pages URL"
+  target <- Data.Either.either Effect.Exception.throw pure (CI.Docs.Access.fromPagesUrl url)
   temporary <- required "RUNNER_TEMP"
   repository <- required "GITHUB_REPOSITORY"
   revision <- required "GITHUB_SHA"
@@ -180,7 +194,7 @@ record bundle pagesArtifact deployment url = do
     evidence = Data.Argonaut.Core.stringify (Data.Argonaut.Encode.encodeJson { repository, revision, run, attempt, deployment, url, producerArtifact, pagesArtifact, bindingDigest, status: "created-not-yet-verified", privateAccess: "not-yet-verified", lastStatus: "created" })
   Platform.Node.Build.writeImpl (temporary <> "/private-pages-deployment.json") evidence
   Build.Output.writeLine Node.Process.stdout evidence (pure unit)
-  Platform.Node.Build.writeImpl outputPath (old <> "deployment_id=" <> deployment <> "\npage_url=" <> url <> "\n")
+  Platform.Node.Build.writeImpl outputPath (old <> "deployment_id=" <> deployment <> "\npage_url=" <> CI.Docs.Access.url target <> "\n")
 
 observed :: String -> Effect.Effect Unit
 observed status = do

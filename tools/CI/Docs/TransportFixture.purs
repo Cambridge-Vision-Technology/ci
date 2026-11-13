@@ -36,6 +36,13 @@ run input arguments = do
   root <- Node.Process.lookupEnv "DOCS_TRANSPORT_TEST_ROOT" >>= Data.Maybe.maybe (Effect.Exception.throw "Missing TEST transport root") pure
   failure <- Data.Maybe.fromMaybe "" <$> Node.Process.lookupEnv "DOCS_TRANSPORT_FAILURE"
   case Data.Array.uncons arguments of
+    Data.Maybe.Just { head: "curl", tail: args } | Data.Array.elem "--dump-header" args -> do
+      CI.Docs.Artifact.ensure (args == [ "--disable", "--silent", "--show-error", "--proto", "=https", "--max-time", "30", "--dump-header", "-", "--output", "/dev/null", "https://test.pages.github.io/" ] && input == "") "Wrong anonymous HTTPS probe contract; credentials, insecure TLS and redirect following are forbidden"
+      count root "probe"
+      if failure == "probe" then Effect.Exception.throw "Injected TEST HTTPS failure"
+      else do
+        response <- Node.Process.lookupEnv "DOCS_TEST_PRIVATE_RESPONSE" >>= Data.Maybe.maybe (Effect.Exception.throw "Missing captured private response") Platform.Node.Build.readImpl
+        Build.Output.writeLine Node.Process.stdout response (pure unit)
     Data.Maybe.Just { head: "curl", tail: args } -> do
       CI.Docs.Artifact.ensure (valueAfter "--header" args == Data.Maybe.Just "@-" && Data.Array.last args == Data.Maybe.Just "https://token.TEST.invalid/oidc") "Wrong OIDC transport request"
       CI.Docs.Artifact.ensure (not (Data.Array.any (Data.String.contains (Data.String.Pattern "TEST-REQUEST-CREDENTIAL")) args)) "OIDC request credential leaked to argv"

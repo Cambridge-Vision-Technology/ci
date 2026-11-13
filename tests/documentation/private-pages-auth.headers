@@ -1,0 +1,20 @@
+HTTP/2 302
+server: GitHub.com
+content-type: text/html
+cache-control: private, no-store
+x-pages-private: 1
+x-origin-cache: no-store
+location: https://github.com/pages/auth?nonce=REDACTED&page_id=REDACTED&path=REDACTED
+x-github-request-id: F722:D6977:253654:271E4A:6AF7019C
+x-github-edge-region: uksouth
+fastly-restarts: 1
+accept-ranges: bytes
+date: Fri, 13 Nov 2026 12:25:00 GMT
+via: 1.1 varnish
+x-served-by: cache-lcy-egml8630033-LCY
+x-cache: MISS
+x-cache-hits: 0
+x-timer: S1794572700.261997,VS0,VE182
+vary: Accept-Encoding
+x-fastly-request-id: e3a52cae8897911f6f740f56c388631f5d4e66f3
+content-length: 138

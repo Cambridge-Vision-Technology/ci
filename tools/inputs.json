@@ -1,5 +1,6 @@
 {
   "docs": [
+    "tools/CI/Docs/Access.purs",
     "tools/CI/Docs/Main.purs",
     "tools/CI/Docs/Artifact.purs",
     "tools/CI/Docs/Json.purs",
@@ -8,6 +9,7 @@
   "fixture": ["tools/CI/Docs/Fixture.purs"],
   "tests": ["tools/CI/Docs/Test.purs"],
   "workflowPlumbing": ["tools/CI/Workflow/PlumbingCheck.purs"],
+  "privateAccessEvidence": ["tests/documentation/private-pages-auth.headers"],
   "transportFixture": [
     "tools/CI/Docs/TransportFixture.purs",
     "tools/CI/Docs/Artifact.purs",
