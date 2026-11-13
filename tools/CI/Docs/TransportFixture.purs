@@ -63,6 +63,8 @@ run input arguments = do
       CI.Docs.Artifact.ensure (Data.Maybe.maybe true (\value -> Data.Argonaut.Core.toString value == Data.Maybe.Just "github-pages") (Foreign.Object.lookup "environment" fields)) "Wrong Pages environment"
       count root "post"
       if failure == "post" then Effect.Exception.throw "Injected TEST POST failure"
+      else if failure == "raw-rounded-max" || failure == "raw-rounded-small" then
+        Build.Output.writeLine Node.Process.stdout ("{\"id\":" <> (if failure == "raw-rounded-max" then "9007199254740991.1" else "1.0000000000000001") <> ",\"status_url\":\"https://unused.TEST.invalid/hint\",\"page_url\":\"https://test.example/\"}") (pure unit)
       else do
         let
           id = if failure == "numeric-id" then Data.Argonaut.Core.fromNumber 9876543210.0 else if failure == "invalid-id" then Data.Argonaut.Core.fromBoolean true else Data.Argonaut.Core.fromString "returned-id"

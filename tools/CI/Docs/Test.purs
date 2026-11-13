@@ -5,8 +5,11 @@ import Prelude hiding (identity)
 import Build.Output as Build.Output
 import CI.Docs.Access as CI.Docs.Access
 import CI.Docs.Artifact as CI.Docs.Artifact
+import CI.Docs.Creation.Json as CI.Docs.Creation.Json
 import CI.Docs.Json as CI.Docs.Json
 import CI.Docs.Publication as CI.Docs.Publication
+import Data.Argonaut.Core as Data.Argonaut.Core
+import Data.Argonaut.Encode as Data.Argonaut.Encode
 import Data.Array as Data.Array
 import Data.Either as Data.Either
 import Data.Foldable as Data.Foldable
@@ -15,6 +18,7 @@ import Data.Time.Duration as Data.Time.Duration
 import Data.Maybe as Data.Maybe
 import Data.Nullable as Data.Nullable
 import Data.String as Data.String
+import Data.String.CodeUnits as Data.String.CodeUnits
 import Effect as Effect
 import Effect.Exception as Effect.Exception
 import Effect.Ref as Effect.Ref
@@ -183,7 +187,7 @@ publication root mode = do
           Effect.Ref.modify_ (_ + 1) calls
           if mode == "creation-failure" then Effect.Exception.throw "Injected Pages creation failure"
           else pure
-            { id: if mode == "numeric-id" then CI.Docs.Json.NumberPagesDeploymentIdJson 9876543210.0 else CI.Docs.Json.StringPagesDeploymentIdJson (if mode == "invalid-id" then "bad/id" else expectedDeployment)
+            { id: if mode == "numeric-id" then CI.Docs.Creation.Json.IntegerIdJson "9876543210" else CI.Docs.Creation.Json.StringIdJson (if mode == "invalid-id" then "bad/id" else expectedDeployment)
             , status_url: if mode == "mechanism" then "https://api.github.com/repositories/123/pages/deployment_status/not-the-id" else "https://api.github.com/repos/TEST/docs/pages/deployments/" <> expectedDeployment
             , page_url: if mode == "verification-failure" then "https://wrong.example/" else if mode == "bootstrap-host-mismatch" then "http://other.pages.github.io/" else siteUrl
             }
@@ -222,26 +226,68 @@ publication root mode = do
     "invalid-id" ->
       reject "Invalid Pages deployment ID" accepted
     "id-protocol" -> do
-      numeric <- CI.Docs.Publication.returnedDeploymentId (CI.Docs.Json.NumberPagesDeploymentIdJson 9876543210.0)
+      numeric <- CI.Docs.Publication.returnedDeploymentId (CI.Docs.Creation.Json.IntegerIdJson "9876543210")
       CI.Docs.Artifact.ensure (numeric == "9876543210") "Returned numeric deployment ID was rounded or changed"
-      revision <- CI.Docs.Publication.returnedDeploymentId (CI.Docs.Json.StringPagesDeploymentIdJson "9675aae35ad26d898478ba5b964c1621d09c0af9")
+      revision <- CI.Docs.Publication.returnedDeploymentId (CI.Docs.Creation.Json.StringIdJson "9675aae35ad26d898478ba5b964c1621d09c0af9")
       CI.Docs.Artifact.ensure (revision == "9675aae35ad26d898478ba5b964c1621d09c0af9") "Returned string deployment ID was changed"
       Data.Foldable.for_
-        [ CI.Docs.Json.NumberPagesDeploymentIdJson 0.0
-        , CI.Docs.Json.NumberPagesDeploymentIdJson (-1.0)
-        , CI.Docs.Json.NumberPagesDeploymentIdJson 1.5
-        , CI.Docs.Json.NumberPagesDeploymentIdJson 1.0e-9
-        , CI.Docs.Json.NumberPagesDeploymentIdJson 9007199254740992.0
-        , CI.Docs.Json.StringPagesDeploymentIdJson ""
-        , CI.Docs.Json.StringPagesDeploymentIdJson "bad/id"
-        , CI.Docs.Json.StringPagesDeploymentIdJson "?override=other"
-        , CI.Docs.Json.StringPagesDeploymentIdJson "id\n"
-        , CI.Docs.Json.StringPagesDeploymentIdJson "."
-        , CI.Docs.Json.StringPagesDeploymentIdJson ".."
-        , CI.Docs.Json.StringPagesDeploymentIdJson "%2fother"
-        , CI.Docs.Json.StringPagesDeploymentIdJson "id#fragment"
+        [ CI.Docs.Creation.Json.IntegerIdJson "0"
+        , CI.Docs.Creation.Json.IntegerIdJson "-1"
+        , CI.Docs.Creation.Json.IntegerIdJson "1.5"
+        , CI.Docs.Creation.Json.IntegerIdJson "1e-9"
+        , CI.Docs.Creation.Json.IntegerIdJson "9007199254740992"
+        , CI.Docs.Creation.Json.StringIdJson ""
+        , CI.Docs.Creation.Json.StringIdJson "bad/id"
+        , CI.Docs.Creation.Json.StringIdJson "?override=other"
+        , CI.Docs.Creation.Json.StringIdJson "id\n"
+        , CI.Docs.Creation.Json.StringIdJson "."
+        , CI.Docs.Creation.Json.StringIdJson ".."
+        , CI.Docs.Creation.Json.StringIdJson "%2fother"
+        , CI.Docs.Creation.Json.StringIdJson "id#fragment"
         ]
         (\value -> reject "Invalid Pages deployment ID" (void (CI.Docs.Publication.returnedDeploymentId value)))
+    "raw-id-protocol" -> do
+      let
+        metadata = Data.Argonaut.Core.stringify (Data.Argonaut.Encode.encodeJson { status_url: "https://unused.TEST.invalid/hint", page_url: "https://test.example/" })
+        wire token = "{\"id\":" <> token <> "," <> Data.String.CodeUnits.drop 1 metadata
+        maximum = wire "9007199254740991"
+        escaped = Data.String.replaceAll (Data.String.Pattern "\"id\":") (Data.String.Replacement "\"\\u0069d\":") maximum
+        nested = "{\"metadata\":{\"id\":9007199254740991.1,\"values\":[true,null,\"🧭 \\\"id\\\":1 }\",{\"more\":1e-99}]}," <> Data.String.CodeUnits.drop 1 (wire "\"returned-id\"")
+      Data.Foldable.for_
+        [ { source: maximum, expected: "9007199254740991" }
+        , { source: escaped, expected: "9007199254740991" }
+        , { source: nested, expected: "returned-id" }
+        ]
+        ( \example -> do
+            created <- Data.Either.either Effect.Exception.throw pure (CI.Docs.Creation.Json.parse example.source)
+            actual <- CI.Docs.Publication.returnedDeploymentId created.id
+            CI.Docs.Artifact.ensure (actual == example.expected) "Raw response lost or selected the wrong deployment ID"
+        )
+      Data.Foldable.for_
+        ( [ "9007199254740991.1"
+          , "9007199254740990.9"
+          , "1.0000000000000001"
+          , "0.99999999999999999"
+          , "9.0071992547409911e15"
+          , "9007199254740992"
+          , "9007199254740993"
+          , "1.0"
+          , "1e0"
+          , "-1"
+          , "0"
+          , "true"
+          , "null"
+          , "[]"
+          , "{}"
+          ] <#> wire
+        )
+        (\source -> CI.Docs.Artifact.ensure (Data.Either.isLeft (CI.Docs.Creation.Json.parse source)) "Raw fractional/ambiguous/out-of-range ID was accepted")
+      Data.Foldable.for_
+        [ metadata
+        , "{\"id\":1,\"\\u0069d\":2," <> Data.String.CodeUnits.drop 1 metadata
+        , "{\"metadata\":{\"id\":1}," <> Data.String.CodeUnits.drop 1 (wire "9007199254740991.1")
+        ]
+        (\source -> CI.Docs.Artifact.ensure (Data.Either.isLeft (CI.Docs.Creation.Json.parse source)) "Missing/duplicate/nested ID selected an unintended operation")
     "progress" ->
       accepted
     "retry-progress" ->
@@ -378,7 +424,7 @@ transport root = do
       else Effect.Exception.throwException error
     Data.Either.Right value ->
       pure value
-  CI.Docs.Artifact.ensure (created.id == CI.Docs.Json.StringPagesDeploymentIdJson "returned-id" && created.status_url == "https://api.github.com/repositories/123/pages/deployment_status/not-the-id" && created.page_url == "https://test.example/") "Production adapter did not decode the returned deployment identity"
+  CI.Docs.Artifact.ensure (created.id == CI.Docs.Creation.Json.StringIdJson "returned-id" && created.status_url == "https://api.github.com/repositories/123/pages/deployment_status/not-the-id" && created.page_url == "https://test.example/") "Production adapter did not decode the returned deployment identity"
   CI.Docs.Publication.record root "9876543210" "returned-id" created.page_url
   initial <- Platform.Node.Build.readImpl (root <> "/private-pages-deployment.json") >>= CI.Docs.Artifact.parse :: Effect.Effect CI.Docs.Json.DeploymentEvidence
   CI.Docs.Artifact.ensure (initial.deployment == "returned-id" && initial.producerArtifact == "12345" && initial.pagesArtifact == "9876543210" && initial.bindingDigest == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" && initial.lastStatus == "created") "Incomplete retained deployment provenance"
@@ -401,7 +447,7 @@ transport root = do
   CI.Docs.Artifact.ensure (probeCalls == "call\ncall\n") "Production HTTPS probe multiplicity changed"
   Node.Process.setEnv "DOCS_TRANSPORT_FAILURE" "numeric-id"
   numericCreated <- CI.Docs.Publication.create (identityFor "synthetic-system") 9876543210.0
-  CI.Docs.Artifact.ensure (numericCreated.id == CI.Docs.Json.NumberPagesDeploymentIdJson 9876543210.0) "Production adapter did not decode the numeric returned ID"
+  CI.Docs.Artifact.ensure (numericCreated.id == CI.Docs.Creation.Json.IntegerIdJson "9876543210") "Production adapter did not decode the numeric returned ID"
   numericId <- CI.Docs.Publication.returnedDeploymentId numericCreated.id
   CI.Docs.Artifact.ensure (numericId == "9876543210") "Production numeric ID was not preserved"
   Node.Process.setEnv "DOCS_TRANSPORT_FAILURE" "oidc"
@@ -414,9 +460,13 @@ transport root = do
   reject "response invalid or uncertain" (void (CI.Docs.Publication.create (identityFor "synthetic-system") 9876543210.0))
   Node.Process.setEnv "DOCS_TRANSPORT_FAILURE" "invalid-id"
   reject "response invalid or uncertain" (void (CI.Docs.Publication.create (identityFor "synthetic-system") 9876543210.0))
+  Node.Process.setEnv "DOCS_TRANSPORT_FAILURE" "raw-rounded-max"
+  reject "response invalid or uncertain" (void (CI.Docs.Publication.create (identityFor "synthetic-system") 9876543210.0))
+  Node.Process.setEnv "DOCS_TRANSPORT_FAILURE" "raw-rounded-small"
+  reject "response invalid or uncertain" (void (CI.Docs.Publication.create (identityFor "synthetic-system") 9876543210.0))
   posts <- Platform.Node.Build.readImpl (root <> "/post.calls")
   requests <- Platform.Node.Build.readImpl (root <> "/curl.calls")
-  CI.Docs.Artifact.ensure (posts == "call\ncall\ncall\ncall\ncall\n" && requests == "call\ncall\ncall\ncall\ncall\ncall\n") "Production transport repeated or omitted a request"
+  CI.Docs.Artifact.ensure (posts == "call\ncall\ncall\ncall\ncall\ncall\ncall\n" && requests == "call\ncall\ncall\ncall\ncall\ncall\ncall\ncall\n") "Production transport repeated or omitted a request"
 
 main :: Effect.Effect Unit
 main = do

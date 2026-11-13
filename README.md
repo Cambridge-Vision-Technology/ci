@@ -105,9 +105,12 @@ uses only the caller's Pages/OIDC authority, not the read App token.
 
 Deployments are serialized per repository without cancelling an active deploy.
 The publisher validates GitHub's required returned deployment ID (string or exact
-integer), constructs status requests for that ID within the known repository,
+integer token), constructs status requests for that ID within the known repository,
 and never follows the returned status URL as a routing instruction. It does not
-guess an ID from the run or revision. It polls that actual operation, rechecks
+guess an ID from the run or revision. Numeric IDs are validated losslessly from
+the raw response before number parsing: only canonical positive decimal integer
+tokens up to `9007199254740991` are accepted. Fractional/exponent tokens and
+ambiguous top-level keys fail closed. It polls that actual operation, rechecks
 private configuration/target URL and requires a
 recognizable GitHub authentication redirect for unauthenticated HTTPS access.
 Network errors and public responses cannot report success. A failed or uncertain
