@@ -209,6 +209,16 @@ let
     "evaluation"
   ];
   publicationCases = [
+    "bootstrap"
+    "auth-handoff"
+    "bootstrap-unavailable"
+    "bootstrap-public-access"
+    "post-public-access"
+    "site-changed"
+    "site-url-changed"
+    "recording-failure"
+    "bootstrap-host-mismatch"
+    "url-protocol"
     "transport"
     "progress"
     "retry-progress"
@@ -251,17 +261,30 @@ let
   publicationChecks = pkgs.lib.genAttrs publicationCases (
     mode:
     pkgs.runCommand "docs-publication-${mode}"
-      {
-        nativeBuildInputs =
-          [
-            pkgs.coreutils
-            fixtureSuccess
-          ]
-          ++ pkgs.lib.optionals (mode == "transport") [
-            fakeCurl
-            fakeGh
-          ];
-      }
+      (
+        {
+          nativeBuildInputs =
+            [
+              pkgs.coreutils
+              fixtureSuccess
+            ]
+            ++ pkgs.lib.optionals (mode == "transport") [
+              fakeCurl
+              fakeGh
+            ];
+        }
+        //
+          pkgs.lib.optionalAttrs
+            (builtins.elem mode [
+              "bootstrap"
+              "auth-handoff"
+              "denial-protocol"
+              "transport"
+            ])
+            {
+              DOCS_TEST_PRIVATE_RESPONSE = "${source inventory.privateAccessEvidence}/tests/documentation/private-pages-auth.headers";
+            }
+      )
       ''
         set -euo pipefail
         exec ${pkgs.coreutils}/bin/timeout --kill-after=2s 60s ${tests} publication ${mode} "$out"

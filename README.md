@@ -87,6 +87,17 @@ Restrict `github-pages` to the default branch and do not configure caller
 concurrency to cancel a default-branch deployment. CI checks `public=false` and
 `build_type=workflow`; a missing/denied/public site is a named setup blocker.
 It never creates a site, changes protections or falls back to public Pages.
+GitHub can initially return an HTTP metadata URL for a private `*.pages.github.io`
+site while its HTTPS endpoint already works. CI validates that metadata and uses
+only the corresponding HTTPS URL, with certificate verification. It does not
+request HTTP or change the HTTPS-enforcement setting. Anonymous HTTPS access must
+produce a recognizable authentication redirect before creation and after actual
+deployment success. The private Pages `/pages/auth` handoff additionally needs
+the `x-pages-private: 1` marker and exactly one Location header. Public responses,
+unavailable TLS, lookalike routes, ambiguous headers or a changed site fail closed.
+The evidence retains GitHub's raw returned page URL; the environment link uses
+the validated HTTPS target. The returned deployment ID is logged before evidence
+recording so recording failures do not hide the operation needed for recovery.
 Docs-enabled callers need authorized read access to the shared tooling's private
 `purs-nix` and `purescript-platform` inputs and their locked dependencies; use
 the existing organization-read capability or authorized SSH access. The publisher
