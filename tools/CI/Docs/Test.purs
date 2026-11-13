@@ -149,6 +149,7 @@ publication root mode = do
     bootstrap = Data.Array.elem mode [ "bootstrap", "bootstrap-unavailable", "bootstrap-public-access", "bootstrap-host-mismatch" ]
     expectedTarget = if bootstrap then "https://test.pages.github.io/" else "https://test.example/"
     siteUrl = if bootstrap then "http://test.pages.github.io/" else expectedTarget
+    expectedDeployment = if mode == "numeric-id" then "9876543210" else if mode == "mechanism" then "returned.id_~" else "returned-id"
     get path
       | path == "repos/TEST/docs" = pure "{\"default_branch\":\"main\"}"
       | path == "repos/TEST/docs/pages" =
@@ -157,7 +158,7 @@ publication root mode = do
             reads <- Effect.Ref.read siteReads
             Effect.Ref.modify_ (_ + 1) siteReads
             pure ("{\"public\":" <> (if mode == "public-site" || (mode == "site-changed" && reads > 0) then "true" else "false") <> ",\"build_type\":\"workflow\",\"html_url\":\"" <> (if mode == "site-url-changed" && reads > 0 then "https://other.example/" else siteUrl) <> "\"}")
-      | path == "repos/TEST/docs/pages/deployments/returned-id" = do
+      | path == "repos/TEST/docs/pages/deployments/" <> expectedDeployment = do
           remaining <- Effect.Ref.read states
           case Data.Array.uncons remaining of
             Data.Maybe.Just { head, tail } -> do
@@ -181,9 +182,13 @@ publication root mode = do
           CI.Docs.Artifact.ensure (actual == identity && artifactId == 9876543210.0) "Wrong Pages creation request identity/artifact"
           Effect.Ref.modify_ (_ + 1) calls
           if mode == "creation-failure" then Effect.Exception.throw "Injected Pages creation failure"
-          else pure { status_url: "https://api.github.com/repos/TEST/docs/pages/deployments/returned-id", page_url: if mode == "verification-failure" then "https://wrong.example/" else if mode == "bootstrap-host-mismatch" then "http://other.pages.github.io/" else siteUrl }
+          else pure
+            { id: if mode == "numeric-id" then CI.Docs.Json.NumberPagesDeploymentIdJson 9876543210.0 else CI.Docs.Json.StringPagesDeploymentIdJson (if mode == "invalid-id" then "bad/id" else expectedDeployment)
+            , status_url: if mode == "mechanism" then "https://api.github.com/repositories/123/pages/deployment_status/not-the-id" else "https://api.github.com/repos/TEST/docs/pages/deployments/" <> expectedDeployment
+            , page_url: if mode == "verification-failure" then "https://wrong.example/" else if mode == "bootstrap-host-mismatch" then "http://other.pages.github.io/" else siteUrl
+            }
       , record: \deployment _ -> do
-          CI.Docs.Artifact.ensure (deployment == "returned-id") "Assumed deployment identity rather than returned identity"
+          CI.Docs.Artifact.ensure (deployment == expectedDeployment) "Assumed deployment identity rather than returned identity"
           Effect.Ref.modify_ (_ + 1) recorded
           when (mode == "recording-failure") (Effect.Exception.throw "Injected evidence recording failure")
       , wait: Effect.Ref.modify_ (_ + 1) waits
@@ -212,6 +217,31 @@ publication root mode = do
       reject "differs from associated" accepted
     "mechanism" ->
       accepted
+    "numeric-id" ->
+      accepted
+    "invalid-id" ->
+      reject "Invalid Pages deployment ID" accepted
+    "id-protocol" -> do
+      numeric <- CI.Docs.Publication.returnedDeploymentId (CI.Docs.Json.NumberPagesDeploymentIdJson 9876543210.0)
+      CI.Docs.Artifact.ensure (numeric == "9876543210") "Returned numeric deployment ID was rounded or changed"
+      revision <- CI.Docs.Publication.returnedDeploymentId (CI.Docs.Json.StringPagesDeploymentIdJson "9675aae35ad26d898478ba5b964c1621d09c0af9")
+      CI.Docs.Artifact.ensure (revision == "9675aae35ad26d898478ba5b964c1621d09c0af9") "Returned string deployment ID was changed"
+      Data.Foldable.for_
+        [ CI.Docs.Json.NumberPagesDeploymentIdJson 0.0
+        , CI.Docs.Json.NumberPagesDeploymentIdJson (-1.0)
+        , CI.Docs.Json.NumberPagesDeploymentIdJson 1.5
+        , CI.Docs.Json.NumberPagesDeploymentIdJson 1.0e-9
+        , CI.Docs.Json.NumberPagesDeploymentIdJson 9007199254740992.0
+        , CI.Docs.Json.StringPagesDeploymentIdJson ""
+        , CI.Docs.Json.StringPagesDeploymentIdJson "bad/id"
+        , CI.Docs.Json.StringPagesDeploymentIdJson "?override=other"
+        , CI.Docs.Json.StringPagesDeploymentIdJson "id\n"
+        , CI.Docs.Json.StringPagesDeploymentIdJson "."
+        , CI.Docs.Json.StringPagesDeploymentIdJson ".."
+        , CI.Docs.Json.StringPagesDeploymentIdJson "%2fother"
+        , CI.Docs.Json.StringPagesDeploymentIdJson "id#fragment"
+        ]
+        (\value -> reject "Invalid Pages deployment ID" (void (CI.Docs.Publication.returnedDeploymentId value)))
     "progress" ->
       accepted
     "retry-progress" ->
@@ -300,7 +330,7 @@ publication root mode = do
   pauses <- Effect.Ref.read waits
   seen <- Effect.Ref.read observations
   let
-    creationExpected = Data.Array.elem mode [ "bootstrap", "auth-handoff", "post-public-access", "site-changed", "site-url-changed", "recording-failure", "bootstrap-host-mismatch", "mechanism", "progress", "retry-progress", "progress-failure", "unknown-status", "retry-exhausted", "creation-failure", "deployment-failure", "verification-failure" ]
+    creationExpected = Data.Array.elem mode [ "bootstrap", "auth-handoff", "post-public-access", "site-changed", "site-url-changed", "recording-failure", "bootstrap-host-mismatch", "mechanism", "numeric-id", "invalid-id", "progress", "retry-progress", "progress-failure", "unknown-status", "retry-exhausted", "creation-failure", "deployment-failure", "verification-failure" ]
     expectedWaits = case mode of
       "progress" -> 5
       "retry-progress" -> 2
@@ -308,10 +338,10 @@ publication root mode = do
       "retry-exhausted" -> 100
       _ -> 0
   CI.Docs.Artifact.ensure (requests == (if creationExpected then 1 else 0)) "Rejected publication unexpectedly created a deployment or skipped its expected creation"
-  CI.Docs.Artifact.ensure (records == (if creationExpected && mode /= "creation-failure" then 1 else 0)) "Wrong deployment evidence multiplicity"
-  CI.Docs.Artifact.ensure (successes == (if Data.Array.elem mode [ "bootstrap", "auth-handoff", "mechanism", "progress", "retry-progress" ] then 1 else 0)) "Wrong verified-deployment claim for the modeled state"
+  CI.Docs.Artifact.ensure (records == (if creationExpected && not (Data.Array.elem mode [ "creation-failure", "invalid-id" ]) then 1 else 0)) "Wrong deployment evidence multiplicity"
+  CI.Docs.Artifact.ensure (successes == (if Data.Array.elem mode [ "bootstrap", "auth-handoff", "mechanism", "numeric-id", "progress", "retry-progress" ] then 1 else 0)) "Wrong verified-deployment claim for the modeled state"
   probeCount <- Effect.Ref.read probes
-  when (Data.Array.elem mode [ "bootstrap", "auth-handoff", "post-public-access", "mechanism", "progress", "retry-progress" ]) (CI.Docs.Artifact.ensure (probeCount == 2) "HTTPS access must be verified before creation and after completion")
+  when (Data.Array.elem mode [ "bootstrap", "auth-handoff", "post-public-access", "mechanism", "numeric-id", "progress", "retry-progress" ]) (CI.Docs.Artifact.ensure (probeCount == 2) "HTTPS access must be verified before creation and after completion")
   when (Data.Array.elem mode [ "bootstrap-unavailable", "bootstrap-public-access", "public-access", "unavailable", "spoof-access", "site-changed", "site-url-changed", "bootstrap-host-mismatch", "verification-failure" ]) (CI.Docs.Artifact.ensure (probeCount == 1) "Unsafe access or changed site did not stop at its expected boundary")
   CI.Docs.Artifact.ensure (pauses == expectedWaits) "Wrong polling multiplicity"
   when (mode == "progress") (CI.Docs.Artifact.ensure (seen == [ "deployment_in_progress", "syncing_files", "finished_file_sync", "updating_pages", "purging_cdn", "succeed", "succeed" ]) "Incomplete documented progress lifecycle")
@@ -348,7 +378,7 @@ transport root = do
       else Effect.Exception.throwException error
     Data.Either.Right value ->
       pure value
-  CI.Docs.Artifact.ensure (created.status_url == "https://api.github.com/repos/TEST/docs/pages/deployments/returned-id" && created.page_url == "https://test.example/") "Production adapter did not decode the returned deployment identity"
+  CI.Docs.Artifact.ensure (created.id == CI.Docs.Json.StringPagesDeploymentIdJson "returned-id" && created.status_url == "https://api.github.com/repositories/123/pages/deployment_status/not-the-id" && created.page_url == "https://test.example/") "Production adapter did not decode the returned deployment identity"
   CI.Docs.Publication.record root "9876543210" "returned-id" created.page_url
   initial <- Platform.Node.Build.readImpl (root <> "/private-pages-deployment.json") >>= CI.Docs.Artifact.parse :: Effect.Effect CI.Docs.Json.DeploymentEvidence
   CI.Docs.Artifact.ensure (initial.deployment == "returned-id" && initial.producerArtifact == "12345" && initial.pagesArtifact == "9876543210" && initial.bindingDigest == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" && initial.lastStatus == "created") "Incomplete retained deployment provenance"
@@ -369,15 +399,24 @@ transport root = do
   CI.Docs.Artifact.ensure (bootstrapEvidence.url == "http://test.pages.github.io/" && bootstrapOutput == "deployment_id=returned-id\npage_url=https://test.pages.github.io/\n") "Raw returned URL was lost or the environment link was not HTTPS"
   probeCalls <- Platform.Node.Build.readImpl (root <> "/probe.calls")
   CI.Docs.Artifact.ensure (probeCalls == "call\ncall\n") "Production HTTPS probe multiplicity changed"
+  Node.Process.setEnv "DOCS_TRANSPORT_FAILURE" "numeric-id"
+  numericCreated <- CI.Docs.Publication.create (identityFor "synthetic-system") 9876543210.0
+  CI.Docs.Artifact.ensure (numericCreated.id == CI.Docs.Json.NumberPagesDeploymentIdJson 9876543210.0) "Production adapter did not decode the numeric returned ID"
+  numericId <- CI.Docs.Publication.returnedDeploymentId numericCreated.id
+  CI.Docs.Artifact.ensure (numericId == "9876543210") "Production numeric ID was not preserved"
   Node.Process.setEnv "DOCS_TRANSPORT_FAILURE" "oidc"
   reject "Pages OIDC response invalid" (void (CI.Docs.Publication.create (identityFor "synthetic-system") 9876543210.0))
   postsBeforeFailure <- Platform.Node.Build.readImpl (root <> "/post.calls")
-  CI.Docs.Artifact.ensure (postsBeforeFailure == "call\n") "Invalid OIDC response reached creation"
+  CI.Docs.Artifact.ensure (postsBeforeFailure == "call\ncall\n") "Invalid OIDC response reached creation"
   Node.Process.setEnv "DOCS_TRANSPORT_FAILURE" "post"
   reject "creation failed or uncertain" (void (CI.Docs.Publication.create (identityFor "synthetic-system") 9876543210.0))
+  Node.Process.setEnv "DOCS_TRANSPORT_FAILURE" "missing-id"
+  reject "response invalid or uncertain" (void (CI.Docs.Publication.create (identityFor "synthetic-system") 9876543210.0))
+  Node.Process.setEnv "DOCS_TRANSPORT_FAILURE" "invalid-id"
+  reject "response invalid or uncertain" (void (CI.Docs.Publication.create (identityFor "synthetic-system") 9876543210.0))
   posts <- Platform.Node.Build.readImpl (root <> "/post.calls")
   requests <- Platform.Node.Build.readImpl (root <> "/curl.calls")
-  CI.Docs.Artifact.ensure (posts == "call\ncall\n" && requests == "call\ncall\ncall\n") "Production transport repeated or omitted a request"
+  CI.Docs.Artifact.ensure (posts == "call\ncall\ncall\ncall\ncall\n" && requests == "call\ncall\ncall\ncall\ncall\ncall\n") "Production transport repeated or omitted a request"
 
 main :: Effect.Effect Unit
 main = do

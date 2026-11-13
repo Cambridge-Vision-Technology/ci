@@ -25,8 +25,23 @@ import Platform.Node.Build as Platform.Node.Build
 type Repository = { default_branch :: String }
 type Site = { public :: Boolean, build_type :: String, html_url :: String }
 type Deployment = { status :: String }
-type Created = { status_url :: String, page_url :: String }
+type Created = { id :: CI.Docs.Json.PagesDeploymentIdJson, status_url :: String, page_url :: String }
 type Oidc = { value :: String }
+
+validateDeploymentId :: String -> Effect.Effect String
+validateDeploymentId value = do
+  CI.Docs.Artifact.ensure (value /= "" && value /= "." && value /= ".." && Data.Array.all (\c -> (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || Data.Array.elem c [ '-', '_', '.', '~' ]) (Data.String.CodeUnits.toCharArray value)) "Invalid Pages deployment ID"
+  pure value
+
+returnedDeploymentId :: CI.Docs.Json.PagesDeploymentIdJson -> Effect.Effect String
+returnedDeploymentId value = case value of
+  CI.Docs.Json.StringPagesDeploymentIdJson text ->
+    validateDeploymentId text
+  CI.Docs.Json.NumberPagesDeploymentIdJson number -> do
+    let
+      text = Data.Argonaut.Core.stringify (Data.Argonaut.Core.fromNumber number)
+    CI.Docs.Artifact.ensure (number > 0.0 && number <= 9007199254740991.0 && Data.Array.all (\c -> c >= '0' && c <= '9') (Data.String.CodeUnits.toCharArray text)) "Invalid Pages deployment ID"
+    validateDeploymentId text
 
 getApi :: String -> Effect.Effect String
 getApi path = CI.Docs.Artifact.text "gh" [ "api", "--method", "GET", "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28", path ]
@@ -69,7 +84,7 @@ probeAccess target = CI.Docs.Artifact.text "curl" [ "--disable", "--silent", "--
 
 deployedWith :: (String -> Effect.Effect String) -> (String -> Effect.Effect String) -> (String -> Effect.Effect Unit) -> CI.Docs.Json.Binding -> String -> String -> Effect.Effect Unit
 deployedWith get probe observe identity deployment url = do
-  CI.Docs.Artifact.ensure (deployment /= "" && Data.Array.all (\c -> (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-') (Data.String.CodeUnits.toCharArray deployment)) "Missing or invalid Pages deployment ID"
+  void (validateDeploymentId deployment)
   status <- get ("repos/" <> identity.repository <> "/pages/deployments/" <> deployment) >>= CI.Docs.Artifact.parse :: Effect.Effect Deployment
   observe status.status
   CI.Docs.Artifact.ensure (status.status == "succeed") "Pages deployment verification failed"
@@ -132,9 +147,7 @@ publishWith client event ref bundle artifact identity = do
   artifactId <- Data.Maybe.maybe (Effect.Exception.throw "Invalid Pages artifact ID") pure (Data.Number.fromString artifact)
   CI.Docs.Artifact.ensure (artifactId > 0.0 && artifactId <= 9007199254740991.0) "Pages artifact ID is outside exact numeric range"
   created <- client.create identity artifactId
-  deployment <- Data.Maybe.maybe (Effect.Exception.throw "Pages returned an unexpected deployment status URL") pure
-    (Data.String.stripPrefix (Data.String.Pattern ("https://api.github.com/repos/" <> identity.repository <> "/pages/deployments/")) created.status_url)
-  CI.Docs.Artifact.ensure (deployment /= "" && Data.Array.all (\c -> (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-') (Data.String.CodeUnits.toCharArray deployment)) "Invalid returned Pages deployment ID"
+  deployment <- returnedDeploymentId created.id
   Build.Output.writeLine Node.Process.stderr ("Pages deployment created: " <> deployment) (pure unit)
   client.record deployment created.page_url
   actualTarget <- Data.Either.either Effect.Exception.throw pure (CI.Docs.Access.fromPagesUrl created.page_url)
@@ -174,7 +187,8 @@ create identity artifactId = do
     [ "api", "--method", "POST", "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28", "repos/" <> identity.repository <> "/pages/deployments", "--input", "-" ]
     { encoding: "utf8", timeout: 30000, maxBuffer: 1048576, killSignal: "SIGTERM", input: payload, cwd: ".", env: environment }
   CI.Docs.Artifact.ensure (Data.Nullable.toMaybe response.status == Data.Maybe.Just 0) "Pages deployment creation failed or uncertain; inspect deployment state before retrying"
-  CI.Docs.Artifact.parse (Data.Maybe.fromMaybe "" (Data.Nullable.toMaybe response.stdout))
+  decoded <- Effect.Exception.try (CI.Docs.Artifact.parse (Data.Maybe.fromMaybe "" (Data.Nullable.toMaybe response.stdout)) :: Effect.Effect Created)
+  Data.Either.either (\_ -> Effect.Exception.throw "Pages deployment response invalid or uncertain; reconcile the existing operation before retrying") pure decoded
 
 record :: String -> String -> String -> String -> Effect.Effect Unit
 record bundle pagesArtifact deployment url = do

@@ -5,6 +5,7 @@ import Prelude
 import Build.Output as Build.Output
 import CI.Docs.Artifact as CI.Docs.Artifact
 import Data.Argonaut.Core as Data.Argonaut.Core
+import Data.Argonaut.Encode as Data.Argonaut.Encode
 import Data.Argonaut.Parser as Data.Argonaut.Parser
 import Data.Array as Data.Array
 import Data.Either as Data.Either
@@ -62,7 +63,15 @@ run input arguments = do
       CI.Docs.Artifact.ensure (Data.Maybe.maybe true (\value -> Data.Argonaut.Core.toString value == Data.Maybe.Just "github-pages") (Foreign.Object.lookup "environment" fields)) "Wrong Pages environment"
       count root "post"
       if failure == "post" then Effect.Exception.throw "Injected TEST POST failure"
-      else Build.Output.writeLine Node.Process.stdout "{\"status_url\":\"https://api.github.com/repos/TEST/docs/pages/deployments/returned-id\",\"page_url\":\"https://test.example/\"}" (pure unit)
+      else do
+        let
+          id = if failure == "numeric-id" then Data.Argonaut.Core.fromNumber 9876543210.0 else if failure == "invalid-id" then Data.Argonaut.Core.fromBoolean true else Data.Argonaut.Core.fromString "returned-id"
+          response =
+            if failure == "missing-id" then
+              Data.Argonaut.Encode.encodeJson { status_url: "https://api.github.com/repositories/123/pages/deployment_status/not-the-id", page_url: "https://test.example/" }
+            else
+              Data.Argonaut.Encode.encodeJson { id, status_url: "https://api.github.com/repositories/123/pages/deployment_status/not-the-id", page_url: "https://test.example/" }
+        Build.Output.writeLine Node.Process.stdout (Data.Argonaut.Core.stringify response) (pure unit)
     _ ->
       Effect.Exception.throw "Unexpected TEST transport executable"
 

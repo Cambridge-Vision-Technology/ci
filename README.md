@@ -104,8 +104,11 @@ the existing organization-read capability or authorized SSH access. The publishe
 uses only the caller's Pages/OIDC authority, not the read App token.
 
 Deployments are serialized per repository without cancelling an active deploy.
-The publisher records GitHub's returned deployment status URL/ID, polls that
-actual operation, rechecks private configuration/target URL and requires a
+The publisher validates GitHub's required returned deployment ID (string or exact
+integer), constructs status requests for that ID within the known repository,
+and never follows the returned status URL as a routing instruction. It does not
+guess an ID from the run or revision. It polls that actual operation, rechecks
+private configuration/target URL and requires a
 recognizable GitHub authentication redirect for unauthenticated HTTPS access.
 Network errors and public responses cannot report success. A failed or uncertain
 operation is a blocker: reconcile the recorded deployment and last verified
