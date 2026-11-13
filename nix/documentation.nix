@@ -75,6 +75,11 @@ let
           "refs"
           "node-event-emitter"
           "node-buffer"
+        ]
+        ++ pkgs.lib.optionals (builtins.elem "tools/CI/Docs/Creation/Json.purs" files) [
+          "parsing"
+          "control"
+          "tuples"
         ];
     });
   compiler = compile inventory.docs platformFiles;
@@ -212,6 +217,7 @@ let
     "numeric-id"
     "invalid-id"
     "id-protocol"
+    "raw-id-protocol"
     "bootstrap"
     "auth-handoff"
     "bootstrap-unavailable"

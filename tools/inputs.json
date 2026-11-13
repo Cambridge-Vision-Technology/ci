@@ -1,6 +1,7 @@
 {
   "docs": [
     "tools/CI/Docs/Access.purs",
+    "tools/CI/Docs/Creation/Json.purs",
     "tools/CI/Docs/Main.purs",
     "tools/CI/Docs/Artifact.purs",
     "tools/CI/Docs/Json.purs",
